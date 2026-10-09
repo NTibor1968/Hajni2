@@ -1,46 +1,65 @@
 import streamlit as st
-from supabase import create_client, Client
+import requests
 from anthropic import Anthropic
 
-# Kulcsok betöltése és automatikus letisztítása a láthatatlan karakterektől
+# Kulcsok betöltése és letisztítása
 try:
     SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().replace("'", "").replace('"', '')
     SUPABASE_KEY = str(st.secrets["SUPABASE_KEY"]).strip().replace("'", "").replace('"', '')
     ANTHROPIC_API_KEY = str(st.secrets["ANTHROPIC_API_KEY"]).strip().replace("'", "").replace('"', '')
 except Exception as e:
-    st.error("Hiba! Hiányzik a .streamlit/secrets.toml fájl vagy hibásak a kulcsok.")
+    st.error("Hiba! Hiányzik a secrets.toml vagy hibásak a kulcsok.")
     st.stop()
 
-# Kliensek inicializálása a letisztított kulcsokkal
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Anthropic kliens inicializálása
 claude_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Supabase kézi fejléc beállítása (ezzel kikerüljük a hibás Supabase könyvtárat!)
+headers = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
 
 st.set_page_config(page_title="Hajni2 Asszisztens", layout="wide")
 
+# --- KÉZI ADATBÁZIS MŰVELETEK (REST API) ---
 def get_projects(status="active"):
     try:
-        response = supabase.table("projects").select("*").eq("status", status).order("created_at", desc=True).execute()
-        return response.data
-    except Exception as e:
-        st.error(f"Adatbázis hiba (Lehet, hogy hibás a Supabase kulcsod?): {e}")
+        url = f"{SUPABASE_URL}/rest/v1/projects?status=eq.{status}&order=created_at.desc"
+        response = requests.get(url, headers=headers)
+        return response.json() if response.status_code == 200 else []
+    except Exception:
         return []
 
 def create_project(name):
     if name.strip():
-        supabase.table("projects").insert({"name": name, "status": "active"}).execute()
+        url = f"{SUPABASE_URL}/rest/v1/projects"
+        data = {"name": name, "status": "active"}
+        requests.post(url, headers=headers, json=data)
         st.rerun()
 
 def archive_project(project_id):
-    supabase.table("projects").update({"status": "archived"}).eq("id", project_id).execute()
+    url = f"{SUPABASE_URL}/rest/v1/projects?id=eq.{project_id}"
+    data = {"status": "archived"}
+    requests.patch(url, headers=headers, json=data)
     st.rerun()
 
 def get_messages(project_id):
-    response = supabase.table("messages").select("*").eq("project_id", project_id).order("created_at", desc=False).execute()
-    return response.data
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/messages?project_id=eq.{project_id}&order=created_at.asc"
+        response = requests.get(url, headers=headers)
+        return response.json() if response.status_code == 200 else []
+    except Exception:
+        return []
 
 def save_message(project_id, role, content):
-    supabase.table("messages").insert({"project_id": project_id, "role": role, "content": content}).execute()
+    url = f"{SUPABASE_URL}/rest/v1/messages"
+    data = {"project_id": project_id, "role": role, "content": content}
+    requests.post(url, headers=headers, json=data)
 
+# --- FELHASZNÁLÓI FELÜLET (UI) ---
 st.title("🤖 Hajni2 AI Munkaállomás")
 
 with st.sidebar:
@@ -49,10 +68,11 @@ with st.sidebar:
     if st.button("➕ Projekt létrehozása", use_container_width=True):
         create_project(new_project_name)
     st.divider()
+    
     active_projektek = get_projects("active")
-    if active_projektek:
+    if active_projektek and isinstance(active_projektek, list):
         st.subheader("Aktív ügyek")
-        project_options = {p["name"]: p["id"] for p in active_projektek}
+        project_options = {p["name"]: p["id"] for p in active_projektek if "name" in p}
         valasztott_nev = st.radio("Válassz projektet:", list(project_options.keys()))
         current_project_id = project_options[valasztott_nev] if valasztott_nev else None
     else:
@@ -68,15 +88,22 @@ if current_project_id:
     with tab_chat:
         st.subheader(f"Folyamatban lévő ügy: {valasztott_nev}")
         messages = get_messages(current_project_id)
-        for msg in messages:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
+        if messages and isinstance(messages, list):
+            for msg in messages:
+                if "role" in msg and "content" in msg:
+                    with st.chat_message(msg["role"]):
+                        st.write(msg["content"])
+        
         if user_input := st.chat_input("Kérdezz, elemezzünk törvényt..."):
             with st.chat_message("user"):
                 st.write(user_input)
             save_message(current_project_id, "user", user_input)
-            context_messages = [{"role": m["role"], "content": m["content"]} for m in messages]
+            
+            context_messages = []
+            if messages and isinstance(messages, list):
+                context_messages = [{"role": m["role"], "content": m["content"]} for m in messages if "role" in m]
             context_messages.append({"role": "user", "content": user_input})
+            
             with st.chat_message("assistant"):
                 with st.spinner("Hajni gondolkodik..."):
                     response = claude_client.messages.create(
