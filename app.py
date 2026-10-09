@@ -103,15 +103,28 @@ if current_project_id:
                 context_messages = [{"role": m["role"], "content": m["content"]} for m in messages if "role" in m]
             context_messages.append({"role": "user", "content": user_input})
             
-            # Claude meghívása
+            # --- RENDSZERUTASÍTÁS (SYSTEM PROMPT) A TÖKÉLETES MAGYAR JOGI NYELVÉRT ---
+            system_instruction = (
+                "Te egy professzionális, rendkívül intelligens és precíz jogi és törvényelemző AI asszisztens vagy, "
+                "akit Piritának (vagy röviden Pirinek) hívnak. Feladatod, hogy a felhasználót maximális szakértelemmel, "
+                "részletesen, ugyanakkor teljesen érthetően segítsd az adózási, vállalkozási és bonyolult jogi ügyekben.\n\n"
+                "KÖTELEZŐEN BETARTANDÓ SZABÁLYOK:\n"
+                "1. Kizárólag tökéletes, érett, szakmailag hiteles és nyelvtanilag teljesen hibátlan MAGYAR nyelven válaszolj!\n"
+                "2. Kerüld a tükörfordításokat és az angolos, mesterkélt kifejezéseket. Fogalmazz úgy, mint egy tapasztalt hazai tanácsadó.\n"
+                "3. A válaszaid legyenek alaposak és strukturáltak. Használj vastag betűs kiemeléseket, bekezdéseket és pontokba szedett listákat a könnyű olvashatóságért.\n"
+                "4. Ne siesd el és ne csapd össze a válaszokat! Ha egy jogszabályt vagy adónemet kell elmagyarázni, fejtsd ki részletesen, hozz gyakorlati példákat, és világíts rá a buktatókra is."
+            )
+            
+            # Claude meghívása a csúcsmodellre (Sonnet 3.5) állítva
             with st.chat_message("assistant"):
                 with st.spinner("Piri gondolkodik..."):
                     response = claude_client.messages.create(
-    model="claude-haiku-4-5",
-    max_tokens=4000,
-    messages=context_messages
-)
-
+                        model="claude-3-5-sonnet-latest", # A legújabb, hivatalos és stabil Sonnet modellnév
+                        max_tokens=4000,
+                        system=system_instruction, # Itt adjuk át az utasítást, hogy gyönyörűen beszéljen magyarul!
+                        messages=context_messages
+                    )
+                    
                     answer = response.content[0].text
                     st.write(answer)
             save_message(current_project_id, "assistant", answer)
