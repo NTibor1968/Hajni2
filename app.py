@@ -58,6 +58,55 @@ def save_message(project_id, role, content):
     url = f"{SUPABASE_URL}/rest/v1/messages"
     requests.post(url, headers=headers, json={"project_id": project_id, "role": role, "content": content})
 
+# --- DOKUMENTUMTÁR MŰVELETEK (projektenként) ---
+MAX_FILE_MB = 10  # a tartalom Base64-ként az adatbázisban tárolódik, ezért korlátozzuk a méretet
+
+def get_documents(project_id):
+    """Az adott projekt dokumentumainak listája (tartalom nélkül)."""
+    try:
+        url = (f"{SUPABASE_URL}/rest/v1/documents?project_id=eq.{project_id}"
+               "&select=id,name,mime_type,size_bytes,created_at&order=created_at.desc")
+        res = requests.get(url, headers=headers)
+        if res.status_code == 200:
+            return res.json()
+        st.warning(f"A dokumentumlista nem tölthető be ({res.status_code}): {res.text[:200]}")
+    except Exception as e:
+        st.warning(f"A dokumentumlista nem tölthető be: {e}")
+    return []
+
+def save_document(project_id, uploaded_file):
+    payload = {
+        "project_id": project_id,
+        "name": uploaded_file.name,
+        "mime_type": uploaded_file.type,
+        "size_bytes": uploaded_file.size,
+        "content_b64": base64.b64encode(uploaded_file.getvalue()).decode("utf-8"),
+    }
+    try:
+        # return=minimal: ne küldje vissza a teljes (nagy) sort
+        res = requests.post(f"{SUPABASE_URL}/rest/v1/documents",
+                            headers={**headers, "Prefer": "return=minimal"}, json=payload)
+        return res.status_code in (200, 201, 204), res.text[:150]
+    except Exception as e:
+        return False, str(e)
+
+@st.cache_data(show_spinner=False, max_entries=10)
+def get_document_content(doc_id):
+    """Egy dokumentum Base64 tartalma (a dokumentumok nem módosulnak, ezért gyorsítótárazható)."""
+    res = requests.get(f"{SUPABASE_URL}/rest/v1/documents?id=eq.{doc_id}&select=content_b64", headers=headers)
+    rows = res.json() if res.status_code == 200 else []
+    if not rows:
+        raise RuntimeError("A dokumentum nem található.")
+    return rows[0]["content_b64"]
+
+def delete_document(doc_id):
+    try:
+        res = requests.delete(f"{SUPABASE_URL}/rest/v1/documents?id=eq.{doc_id}",
+                              headers={**headers, "Prefer": "return=minimal"})
+        return res.status_code in (200, 204)
+    except Exception:
+        return False
+
 # --- OLDALSÁV (SIDEBAR) ---
 with st.sidebar:
     st.header("🗂️ Projektek")
@@ -82,21 +131,84 @@ with st.sidebar:
 
 # --- FŐKÉPERNYŐ CHAT ÉS FÁJLKEZELŐ FUNKCIÓVAL ---
 if current_project_id:
+    # A projekt saját dokumentumtára (itt csak a metaadatok; a tartalom igény szerint töltődik be)
+    project_docs = get_documents(current_project_id)
+    docs_by_id = {d["id"]: d for d in project_docs}
+
     tab_chat, tab_docs, tab_diagrams = st.tabs(["💬 Beszélgetés", "📄 Dokumentumok és Képek csatolása", "📊 Folyamatábrák"])
-    
+
     with tab_docs:
-        st.subheader("📁 Anyagok csatolása a munkához")
-        st.write("Feltölthetsz dokumentumokat (TXT, PDF) vagy képernyőképeket (PNG, JPG), amelyeket Piri elemezni fog.")
+        st.subheader(f"📁 A(z) „{valasztott_nev}” projekt dokumentumtára")
+        st.write("Az itt tárolt dokumentumok (TXT, PDF) és képek (PNG, JPG) kizárólag ehhez a projekthez tartoznak, más projektben nem jelennek meg.")
 
-        uploaded_files = st.file_uploader("Válassz fájlokat vagy képeket:", type=["txt", "pdf", "png", "jpg", "jpeg"], accept_multiple_files=True, key="workspace_uploader")
+        flash = st.session_state.pop("docs_flash", None)
+        if flash:
+            getattr(st, flash[0])(flash[1])
 
-        for uploaded_file in uploaded_files:
-            st.info(f"📎 Csatolva: {uploaded_file.name} ({uploaded_file.type})")
-            if "image" in uploaded_file.type:
-                st.image(uploaded_file, caption=f"Előnézet: {uploaded_file.name}")
+        # A kulcsban lévő számláló nullázza a feltöltőt mentés után, így nem mentjük el kétszer ugyanazt
+        nonce = st.session_state.get("uploader_nonce", {}).get(current_project_id, 0)
+        uploaded_files = st.file_uploader(
+            "Válassz fájlokat vagy képeket:",
+            type=["txt", "pdf", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key=f"uploader_{current_project_id}_{nonce}",
+        )
+
+        if uploaded_files and st.button("💾 Feltöltés a projekt dokumentumtárába", type="primary"):
+            saved, failed = 0, []
+            for f in uploaded_files:
+                if f.size > MAX_FILE_MB * 1024 * 1024:
+                    failed.append(f"{f.name} (nagyobb, mint {MAX_FILE_MB} MB)")
+                    continue
+                ok, detail = save_document(current_project_id, f)
+                if ok:
+                    saved += 1
+                else:
+                    failed.append(f"{f.name} ({detail})")
+            if failed:
+                msg = "Nem sikerült feltölteni: " + "; ".join(failed) + "."
+                if saved:
+                    msg += f" Sikeresen feltöltve: {saved} fájl."
+                st.session_state["docs_flash"] = ("error", msg)
+            else:
+                st.session_state["docs_flash"] = ("success", f"{saved} fájl feltöltve a projekthez.")
+            st.session_state.setdefault("uploader_nonce", {})[current_project_id] = nonce + 1
+            st.rerun()
+
+        st.divider()
+        if not project_docs:
+            st.info("Ebben a projektben még nincs dokumentum.")
+        for doc in project_docs:
+            is_image = doc["mime_type"].startswith("image/")
+            col_info, col_prev, col_del = st.columns([6, 2, 1])
+            size_kb = max(1, round((doc.get("size_bytes") or 0) / 1024))
+            col_info.write(f"{'🖼️' if is_image else '📄'} **{doc['name']}** · {size_kb} KB · {str(doc.get('created_at', ''))[:10]}")
+            if is_image and col_prev.checkbox("Előnézet", key=f"prev_{doc['id']}"):
+                try:
+                    st.image(base64.b64decode(get_document_content(doc["id"])), caption=doc["name"], width=400)
+                except Exception:
+                    st.warning("Az előnézet nem tölthető be.")
+            if col_del.button("🗑️", key=f"del_{doc['id']}", help="Dokumentum törlése a projektből"):
+                if delete_document(doc["id"]):
+                    st.rerun()
+                else:
+                    st.error("A törlés nem sikerült.")
     
     with tab_chat:
         st.subheader(f"Folyamatban lévő ügy: {valasztott_nev}")
+
+        # Melyik projekt-dokumentumokat vegye figyelembe Piri (alapból mindet)
+        selected_doc_ids = []
+        if project_docs:
+            with st.expander(f"📎 Piri számára csatolt dokumentumok ({len(project_docs)} a projektben)"):
+                doc_ids = [d["id"] for d in project_docs]
+                selected_doc_ids = st.multiselect(
+                    "Ezeket veszi figyelembe Piri a következő kérdésnél:",
+                    options=doc_ids,
+                    default=doc_ids,
+                    format_func=lambda i: docs_by_id[i]["name"],
+                    key=f"ctx_{current_project_id}_{'_'.join(map(str, doc_ids))}",
+                )
         
         messages = get_messages(current_project_id)
         if messages and isinstance(messages, list):
@@ -117,38 +229,37 @@ if current_project_id:
             current_content = []
             text_attachments = []
 
-            for uploaded_file in uploaded_files:
-                # Képkezelés Base64 formátumban
-                if "image" in uploaded_file.type:
-                    base64_image = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
+            # Csak az aktuális projekt dokumentumai kerülhetnek a kérdés mellé
+            for doc_id in selected_doc_ids:
+                doc = docs_by_id.get(doc_id)
+                if not doc:
+                    continue
+                try:
+                    b64_data = get_document_content(doc_id)
+                except Exception:
+                    st.error(f"A(z) {doc['name']} dokumentum nem tölthető be, ezért nem csatoltam.")
+                    continue
+                mime = doc["mime_type"]
 
+                # Képkezelés Base64 formátumban
+                if mime.startswith("image/"):
                     current_content.append({
                         "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": uploaded_file.type,
-                            "data": base64_image
-                        }
+                        "source": {"type": "base64", "media_type": mime, "data": b64_data}
                     })
 
                 # PDF dokumentum csatolása Base64 formátumban
-                elif uploaded_file.type == "application/pdf":
-                    base64_pdf = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
-
+                elif mime == "application/pdf":
                     current_content.append({
                         "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": base64_pdf
-                        },
-                        "title": uploaded_file.name
+                        "source": {"type": "base64", "media_type": "application/pdf", "data": b64_data},
+                        "title": doc["name"]
                     })
 
                 # Szöveges fájl csatolása
-                elif "text" in uploaded_file.type:
-                    string_data = uploaded_file.getvalue().decode("utf-8")
-                    text_attachments.append(f"[Mellékelt fájl tartalma ({uploaded_file.name}):\n{string_data}]")
+                elif mime.startswith("text/"):
+                    string_data = base64.b64decode(b64_data).decode("utf-8", errors="replace")
+                    text_attachments.append(f"[Mellékelt fájl tartalma ({doc['name']}):\n{string_data}]")
 
             if text_attachments:
                 user_input = "\n\n".join(text_attachments) + f"\n\n{user_input}"
