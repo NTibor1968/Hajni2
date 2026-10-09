@@ -85,9 +85,9 @@ if current_project_id:
     
     with tab_docs:
         st.subheader("📁 Anyagok csatolása a munkához")
-        st.write("Feltölthetsz dokumentumokat (TXT) vagy képernyőképeket (PNG, JPG), amelyeket Piri elemezni fog.")
-        
-        uploaded_file = st.file_uploader("Válassz fájlt vagy képet:", type=["txt", "png", "jpg", "jpeg"], key="workspace_uploader")
+        st.write("Feltölthetsz dokumentumokat (TXT, PDF) vagy képernyőképeket (PNG, JPG), amelyeket Piri elemezni fog.")
+
+        uploaded_file = st.file_uploader("Válassz fájlt vagy képet:", type=["txt", "pdf", "png", "jpg", "jpeg"], key="workspace_uploader")
         
         if uploaded_file:
             st.info(f"📎 Csatolva: {uploaded_file.name} ({uploaded_file.type})")
@@ -128,7 +128,21 @@ if current_project_id:
                         "data": base64_image
                     }
                 })
-            
+
+            # PDF dokumentum csatolása Base64 formátumban
+            elif uploaded_file and uploaded_file.type == "application/pdf":
+                base64_pdf = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
+
+                current_content.append({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": base64_pdf
+                    },
+                    "title": uploaded_file.name
+                })
+
             # Szöveges fájl csatolása
             elif uploaded_file and "text" in uploaded_file.type:
                 string_data = uploaded_file.read().decode("utf-8")
