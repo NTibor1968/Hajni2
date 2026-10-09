@@ -6,7 +6,7 @@ from anthropic import Anthropic
 # Kényszerített oldal konfiguráció a legelső sorban
 st.set_page_config(page_title="Piri Asszisztens", layout="wide")
 
-# Kulcsok biztonságos betöltése a Streamlit felhőből (Nem a kódból!)
+# --- KULCSOK BIZTONSÁGOS BETÖLTÉSE ---
 try:
     SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().strip("'").strip('"')
     SUPABASE_KEY = str(st.secrets["SUPABASE_KEY"]).strip().strip("'").strip('"')
@@ -15,8 +15,10 @@ except Exception as e:
     st.error("Hiba! Hiányzik a Secrets konfiguráció a Streamlit felületén.")
     st.stop()
 
-# Kliens indítása
-claude_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+# --- ATOMBIZTOS UK-TISZTÍTÁS ÉS INICIALIZÁLÁS ---
+# A legfrissebb Secrets-ből beolvasott tiszta kulccsal indítjuk el a klienst
+clean_key = str(ANTHROPIC_API_KEY).strip().replace("'", "").replace('"', '')
+claude_client = Anthropic(api_key=clean_key)
 
 # Supabase hálózati fejléc
 headers = {
@@ -139,7 +141,7 @@ if current_project_id:
             
             api_messages.append({"role": "user", "content": current_content})
             
-            # SYSTEM PROMPT A GYÖNYÖRŰ MAGYAR JOGI NYELVÉRT (SOHA LE NEM JÁRÓ MODELLHEZ)
+            # SYSTEM PROMPT A GYÖNYÖRŰ MAGYAR JOGI NYELVÉRT
             system_instruction = (
                 "Te egy professzionális, rendkívül intelligens és precíz jogi és törvényelemző AI asszisztens vagy, "
                 "akit Piritának (vagy röviden Pirinek) hívnak. Feladatod, hogy a felhasználót maximális szakértelemmel, "
@@ -155,14 +157,16 @@ if current_project_id:
             
             with st.chat_message("assistant"):
                 with st.spinner("Piri elemzi a tartalmat és gondolkodik..."):
+                    # ITT A JAVÍTÁS: A kód elején tökéletesen beállított claude_client-et használjuk!
                     response = claude_client.messages.create(
-                        model="claude-3-5-sonnet-latest", # A felhőben ez a név tökéletesen le fut!
+                        model="claude-3-5-sonnet-latest",
                         max_tokens=4000,
                         system=system_instruction,
                         messages=api_messages
                     )
                     
                     answer = response.content[0].text
+                    st.write(answer)
             
             save_message(current_project_id, "assistant", answer)
             st.rerun()
