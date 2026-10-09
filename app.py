@@ -159,11 +159,12 @@ if current_project_id:
                 with st.spinner("Piri elemzi a tartalmat és gondolkodik..."):
                     # ITT A JAVÍTÁS: A kód elején tökéletesen beállított claude_client-et használjuk!
                     response = claude_client.messages.create(
-    model="claude-3-5-haiku-latest", # Ez a legújabb, univerzális, minden környezetben működő Haiku név!
+    model="claude-3-5-haiku-20241022", # Ez a hivatalos, éles, fix Haiku azonosító!
     max_tokens=4000,
     system=system_instruction,
     messages=api_messages
 )
+
 
 
                     answer = response.content[0].text
