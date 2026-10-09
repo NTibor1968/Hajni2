@@ -3,7 +3,7 @@ import requests
 from anthropic import Anthropic
 
 # Kényszerített oldal konfiguráció a legelső sorban
-st.set_page_config(page_title="Hajni2 Asszisztens", layout="wide")
+st.set_page_config(page_title="Piri Asszisztens", layout="wide")
 
 # Kulcsok biztonságos betöltése a Streamlit felhőből (Nem a kódból!)
 try:
@@ -25,7 +25,7 @@ headers = {
     "Prefer": "return=representation"
 }
 
-st.title("🤖 Hajni2 AI Munkaállomás")
+st.title("🤖 Piri AI Munkaállomás")
 
 # --- ADATBÁZIS MŰVELETEK ---
 def get_projects(status="active"):
