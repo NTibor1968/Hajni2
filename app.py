@@ -2,22 +2,28 @@ import streamlit as st
 from supabase import create_client, Client
 from anthropic import Anthropic
 
+# Kulcsok betöltése és automatikus letisztítása a láthatatlan karakterektől
 try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    ANTHROPIC_API_KEY = st.secrets["ANTHROPIC_API_KEY"]
+    SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().replace("'", "").replace('"', '')
+    SUPABASE_KEY = str(st.secrets["SUPABASE_KEY"]).strip().replace("'", "").replace('"', '')
+    ANTHROPIC_API_KEY = str(st.secrets["ANTHROPIC_API_KEY"]).strip().replace("'", "").replace('"', '')
 except Exception as e:
     st.error("Hiba! Hiányzik a .streamlit/secrets.toml fájl vagy hibásak a kulcsok.")
     st.stop()
 
+# Kliensek inicializálása a letisztított kulcsokkal
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 claude_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 st.set_page_config(page_title="Hajni2 Asszisztens", layout="wide")
 
 def get_projects(status="active"):
-    response = supabase.table("projects").select("*").eq("status", status).order("created_at", desc=True).execute()
-    return response.data
+    try:
+        response = supabase.table("projects").select("*").eq("status", status).order("created_at", desc=True).execute()
+        return response.data
+    except Exception as e:
+        st.error(f"Adatbázis hiba (Lehet, hogy hibás a Supabase kulcsod?): {e}")
+        return []
 
 def create_project(name):
     if name.strip():
@@ -89,5 +95,3 @@ if current_project_id:
         st.subheader("Generált folyamatábrák")
 else:
     st.write("### 👈 Kezdéshez válassz vagy hozz létre egy projektet a bal oldali sávban!")
-
-
