@@ -25,7 +25,7 @@ headers = {
 
 st.set_page_config(page_title="Hajni2 Asszisztens", layout="wide")
 
-# --- KÉZI ADATBÁZIS MŰVELETEK (HIBAKEZELÉSSEL) ---
+# --- KÉZI ADATBÁZIS MŰVELETEK ---
 def get_projects(status="active"):
     try:
         url = f"{SUPABASE_URL}/rest/v1/projects?status=eq.{status}&order=created_at.desc"
