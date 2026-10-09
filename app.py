@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-import base64
 from anthropic import Anthropic
 
 # Kényszerített oldal konfiguráció a legelső sorban
@@ -16,7 +15,6 @@ except Exception as e:
     st.stop()
 
 # --- ATOMBIZTOS UK-TISZTÍTÁS ÉS INICIALIZÁLÁS ---
-# A legfrissebb Secrets-ből beolvasott tiszta kulccsal indítjuk el a klienst
 clean_key = str(ANTHROPIC_API_KEY).strip().replace("'", "").replace('"', '')
 claude_client = Anthropic(api_key=clean_key)
 
@@ -79,75 +77,37 @@ with st.sidebar:
         st.info("Nincs aktív projekt.")
         current_project_id = None
 
-# --- FŐKÉPERNYŐ CHAT ÉS FÁJLKEZELŐ FUNKCIÓVAL ---
+# --- FŐKÉPERNYŐ TISZTA CHAT FUNKCIÓVAL ---
 if current_project_id:
-    tab_chat, tab_docs, tab_diagrams = st.tabs(["💬 Beszélgetés", "📄 Dokumentumok és Képek csatolása", "📊 Folyamatábrák"])
-    
-    with tab_docs:
-        st.subheader("📁 Anyagok csatolása a munkához")
-        st.write("Feltölthetsz dokumentumokat (TXT) vagy képernyőképeket (PNG, JPG), amelyeket Piri elemezni fog.")
-        
-        uploaded_file = st.file_uploader("Válassz fájlt vagy képet:", type=["txt", "png", "jpg", "jpeg"], key="workspace_uploader")
-        
-        if uploaded_file:
-            st.info(f"📎 Csatolva: {uploaded_file.name} ({uploaded_file.type})")
-            if "image" in uploaded_file.type:
-                st.image(uploaded_file, caption="Feltöltött képernyőkép előnézete")
+    tab_chat, tab_docs, tab_diagrams = st.tabs(["💬 Beszélgetés", "📄 Dokumentumok", "📊 Folyamatábrák"])
     
     with tab_chat:
         st.subheader(f"Folyamatban lévő ügy: {valasztott_nev}")
         
+        # Üzenetek betöltése a Supabase memóriából
         messages = get_messages(current_project_id)
         if messages and isinstance(messages, list):
             for msg in messages:
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
         
-        if user_input := st.chat_input("Kérdezz Piritól, vagy kérj elemzést a csatolt fájlra..."):
+        # Chat input mező az AI-hoz (Tiszta szöveges küldés, mint régen)
+        if user_input := st.chat_input("Kérdezz Piritól..."):
             with st.chat_message("user"):
                 st.write(user_input)
-            
             save_message(current_project_id, "user", user_input)
             
-            api_messages = []
+            # Kontextus felépítése tiszta szöveges formátumban
+            context_messages = []
             if messages and isinstance(messages, list):
-                api_messages = [{"role": m["role"], "content": m["content"]} for m in messages if "role" in m]
-            
-            current_content = []
-            
-            # Képkezelés Base64 formátumban
-            if uploaded_file and "image" in uploaded_file.type:
-                file_bytes = uploaded_file.read()
-                base64_image = base64.b64encode(file_bytes).decode("utf-8")
-                
-                current_content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": uploaded_file.type,
-                        "data": base64_image
-                    }
-                })
-            
-            # Szöveges fájl csatolása
-            elif uploaded_file and "text" in uploaded_file.type:
-                string_data = uploaded_file.read().decode("utf-8")
-                user_input = f"[Mellékelt fájl tartalma ({uploaded_file.name}):\n{string_data}]\n\n{user_input}"
-            
-            current_content.append({
-                "type": "text",
-                "text": user_input
-            })
-            
-            api_messages.append({"role": "user", "content": current_content})
+                context_messages = [{"role": m["role"], "content": m["content"]} for m in messages if "role" in m]
+            context_messages.append({"role": "user", "content": user_input})
             
             # SYSTEM PROMPT A GYÖNYÖRŰ MAGYAR JOGI NYELVÉRT
             system_instruction = (
                 "Te egy professzionális, rendkívül intelligens és precíz jogi és törvényelemző AI asszisztens vagy, "
                 "akit Piritának (vagy röviden Pirinek) hívnak. Feladatod, hogy a felhasználót maximális szakértelemmel, "
-                "részletesen, ugyanakkor teljesen érthetően segítsd az adózási, vállalkozási és bonyolult jogi ügyekben.\n"
-                "Képes vagy képek, képernyőképek és dokumentumok elemzésére is. Ha a felhasználó képet küld, "
-                "elemezd azt tűpontosan és válaszolj a kérdéseire.\n\n"
+                "részletesen, ugyanakkor teljesen érthetően segítsd az adózási, vállalkozási és bonyolult jogi ügyekben.\n\n"
                 "KÖTELEZŐEN BETARTANDÓ SZABÁLYOK:\n"
                 "1. Kizárólag tökéletes, érett, szakmailag hiteles és nyelvtanilag teljesen hibátlan MAGYAR nyelven válaszolj!\n"
                 "2. Kerüld a tükörfordításokat és az angolos, mesterkélt kifejezéseket. Fogalmazz úgy, mint egy tapasztalt hazai tanácsadó.\n"
@@ -156,23 +116,24 @@ if current_project_id:
             )
             
             with st.chat_message("assistant"):
-                with st.spinner("Piri elemzi a tartalmat és gondolkodik..."):
-                    # ITT A JAVÍTÁS: A kód elején tökéletesen beállított claude_client-et használjuk!
+                with st.spinner("Piri gondolkodik..."):
+                    # Tiszta hívás a minden fiókban és régi csomagban is nyitott stabil Haiku modellnévvel
                     response = claude_client.messages.create(
-    model="claude-3-5-haiku-20241022", # Ez a hivatalos, éles, fix Haiku azonosító!
-    max_tokens=4000,
-    system=system_instruction,
-    messages=api_messages
-)
-
-
-
+                        model="claude-3-5-haiku-20241022",
+                        max_tokens=4000,
+                        system=system_instruction,
+                        messages=context_messages
+                    )
+                    
                     answer = response.content[0].text
                     st.write(answer)
-            
             save_message(current_project_id, "assistant", answer)
             st.rerun()
             
+    with tab_docs:
+        st.subheader("Feltöltött anyagok")
+        st.file_uploader("Fájlok csatolása:", type=["txt", "pdf", "docx"])
+        
     with tab_diagrams:
         st.subheader("Generált folyamatábrák")
 else:
