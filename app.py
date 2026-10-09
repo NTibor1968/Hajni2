@@ -87,12 +87,12 @@ if current_project_id:
         st.subheader("📁 Anyagok csatolása a munkához")
         st.write("Feltölthetsz dokumentumokat (TXT, PDF) vagy képernyőképeket (PNG, JPG), amelyeket Piri elemezni fog.")
 
-        uploaded_file = st.file_uploader("Válassz fájlt vagy képet:", type=["txt", "pdf", "png", "jpg", "jpeg"], key="workspace_uploader")
-        
-        if uploaded_file:
+        uploaded_files = st.file_uploader("Válassz fájlokat vagy képeket:", type=["txt", "pdf", "png", "jpg", "jpeg"], accept_multiple_files=True, key="workspace_uploader")
+
+        for uploaded_file in uploaded_files:
             st.info(f"📎 Csatolva: {uploaded_file.name} ({uploaded_file.type})")
             if "image" in uploaded_file.type:
-                st.image(uploaded_file, caption="Feltöltött képernyőkép előnézete")
+                st.image(uploaded_file, caption=f"Előnézet: {uploaded_file.name}")
     
     with tab_chat:
         st.subheader(f"Folyamatban lévő ügy: {valasztott_nev}")
@@ -114,40 +114,44 @@ if current_project_id:
                 api_messages = [{"role": m["role"], "content": m["content"]} for m in messages if "role" in m]
             
             current_content = []
-            
-            # Képkezelés Base64 formátumban
-            if uploaded_file and "image" in uploaded_file.type:
-                file_bytes = uploaded_file.read()
-                base64_image = base64.b64encode(file_bytes).decode("utf-8")
-                
-                current_content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": uploaded_file.type,
-                        "data": base64_image
-                    }
-                })
+            text_attachments = []
 
-            # PDF dokumentum csatolása Base64 formátumban
-            elif uploaded_file and uploaded_file.type == "application/pdf":
-                base64_pdf = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
+            for uploaded_file in uploaded_files:
+                # Képkezelés Base64 formátumban
+                if "image" in uploaded_file.type:
+                    base64_image = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
 
-                current_content.append({
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": base64_pdf
-                    },
-                    "title": uploaded_file.name
-                })
+                    current_content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": uploaded_file.type,
+                            "data": base64_image
+                        }
+                    })
 
-            # Szöveges fájl csatolása
-            elif uploaded_file and "text" in uploaded_file.type:
-                string_data = uploaded_file.read().decode("utf-8")
-                user_input = f"[Mellékelt fájl tartalma ({uploaded_file.name}):\n{string_data}]\n\n{user_input}"
-            
+                # PDF dokumentum csatolása Base64 formátumban
+                elif uploaded_file.type == "application/pdf":
+                    base64_pdf = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
+
+                    current_content.append({
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": base64_pdf
+                        },
+                        "title": uploaded_file.name
+                    })
+
+                # Szöveges fájl csatolása
+                elif "text" in uploaded_file.type:
+                    string_data = uploaded_file.getvalue().decode("utf-8")
+                    text_attachments.append(f"[Mellékelt fájl tartalma ({uploaded_file.name}):\n{string_data}]")
+
+            if text_attachments:
+                user_input = "\n\n".join(text_attachments) + f"\n\n{user_input}"
+
             current_content.append({
                 "type": "text",
                 "text": user_input
