@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import base64
+from datetime import date
 from anthropic import Anthropic
 
 # Kényszerített oldal konfiguráció a legelső sorban
@@ -170,20 +171,48 @@ if current_project_id:
                 "1. Kizárólag tökéletes, érett, szakmailag hiteles és nyelvtanilag teljesen hibátlan MAGYAR nyelven válaszolj!\n"
                 "2. Kerüld a tükörfordításokat és az angolos, mesterkélt kifejezéseket. Fogalmazz úgy, mint egy tapasztalt hazai tanácsadó.\n"
                 "3. A válaszaid legyenek alaposak és strukturáltak. Használj vastag betűs kiemeléseket és listákat.\n"
-                "4. Ne siesd el a választ, fejtsd ki részletesen a pontokat!"
+                "4. Ne siesd el a választ, fejtsd ki részletesen a pontokat!\n\n"
+                "INTERNETES KERESÉS:\n"
+                f"A mai dátum: {date.today().isoformat()}. Van internetes keresési lehetőséged. "
+                "A tudásod egy jóval korábbi időpontig tart, ezért a hatályos jogszabályokra, adómértékekre, határidőkre, "
+                "díjakra, hatósági szabályokra és minden aktuális adatra keress rá, mielőtt válaszolsz, még ha biztosnak is érzed magad. "
+                "Magyar jogi és adózási kérdésekben elsősorban hivatalos forrásokat használj (pl. njt.hu, nav.gov.hu, magyarkozlony.hu). "
+                "A válaszban jelöld meg, mely forrásokra támaszkodtál."
             )
-            
-            with st.chat_message("assistant"):
-                with st.spinner("Piri elemzi a tartalmat és gondolkodik..."):
-                    response = claude_client.messages.create(
-                        model="claude-haiku-5-5",  # A Claude Haiku 3.5 2026.02.19-én kivezetésre került
-                        max_tokens=16000,
-                        system=system_instruction,
-                        messages=api_messages
-                    )
 
-                    # Az új modellek gondolkodási (thinking) blokkot is visszaadhatnak, ezért csak a szöveges blokkokat vesszük
-                    answer = "".join(block.text for block in response.content if block.type == "text")
+            # Beépített webes kereső eszköz (az Anthropic szerverein fut)
+            tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+
+            with st.chat_message("assistant"):
+                with st.spinner("Piri elemzi a tartalmat, keres és gondolkodik..."):
+                    answer_parts = []
+                    sources = {}
+
+                    # A szerveroldali keresés megszakadhat (pause_turn), ilyenkor folytatjuk a választ
+                    for _ in range(3):
+                        response = claude_client.messages.create(
+                            model="claude-haiku-5-5",  # A Claude Haiku 3.5 2026.02.19-én kivezetésre került
+                            max_tokens=16000,
+                            system=system_instruction,
+                            messages=api_messages,
+                            tools=tools
+                        )
+
+                        # Az új modellek gondolkodási (thinking) és keresési blokkot is visszaadhatnak, ezért csak a szöveges blokkokat vesszük
+                        for block in response.content:
+                            if block.type == "text":
+                                answer_parts.append(block.text)
+                                for citation in block.citations or []:
+                                    if getattr(citation, "url", None):
+                                        sources[citation.url] = citation.title or citation.url
+
+                        if response.stop_reason != "pause_turn":
+                            break
+                        api_messages.append({"role": "assistant", "content": response.content})
+
+                    answer = "".join(answer_parts)
+                    if sources:
+                        answer += "\n\n**Források:**\n" + "\n".join(f"- [{title}]({url})" for url, title in sources.items())
                     st.write(answer)
             
             save_message(current_project_id, "assistant", answer)
