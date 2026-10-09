@@ -5,14 +5,15 @@ from anthropic import Anthropic
 # Kényszerített oldal konfiguráció a legelső sorban
 st.set_page_config(page_title="Piri Asszisztens", layout="wide")
 
-# Kulcsok biztonságos betöltése a Streamlit felhőből (Nem a kódból!)
-try:
-    SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().strip("'").strip('"')
-    SUPABASE_KEY = str(st.secrets["SUPABASE_KEY"]).strip().strip("'").strip('"')
-    ANTHROPIC_API_KEY = str(st.secrets["ANTHROPIC_API_KEY"]).strip().strip("'").strip('"')
-except Exception as e:
-    st.error("Hiba! Hiányzik a Secrets konfiguráció a Streamlit felületén.")
-    st.stop()
+# --- KULCSOK (MÁR BIZONYÍTOTTAN MŰKÖDNEK) ---
+RAW_URL = "https://vjyyynjtbhdqmrirpnsj.supabase.co"
+RAW_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZqeXl5bmp0YmhkcW1yaXJwbnNqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE1NDEyMzMsImV4cCI6MjEwNzExNzIzM30.3sXFzw_MBssDdgJmQi4MQpbEMmyoMaFQw56Mbu3xCyw"
+RAW_ANTHROPIC_KEY = "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"
+
+# Automatikus tisztítás
+SUPABASE_URL = str(RAW_URL).strip().replace("'", "").replace('"', '')
+SUPABASE_KEY = str(RAW_SUPABASE_KEY).strip().replace("'", "").replace('"', '')
+ANTHROPIC_API_KEY = str(st.secrets.get("ANTHROPIC_API_KEY", RAW_ANTHROPIC_KEY)).strip().replace("'", "").replace('"', '')
 
 # Kliens indítása
 claude_client = Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -83,30 +84,35 @@ if current_project_id:
     with tab_chat:
         st.subheader(f"Folyamatban lévő ügy: {valasztott_nev}")
         
+        # Üzenetek betöltése a Supabase memóriából
         messages = get_messages(current_project_id)
         if messages and isinstance(messages, list):
             for msg in messages:
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
         
-        if user_input := st.chat_input("Kérdezz Hajnitól..."):
+        # Chat input mező az AI-hoz
+        if user_input := st.chat_input("Kérdezz Piritól..."):
             with st.chat_message("user"):
                 st.write(user_input)
             save_message(current_project_id, "user", user_input)
             
+            # Kontextus összeállítása a Claude-nak
             context_messages = []
             if messages and isinstance(messages, list):
                 context_messages = [{"role": m["role"], "content": m["content"]} for m in messages if "role" in m]
             context_messages.append({"role": "user", "content": user_input})
             
+            # Claude meghívása
             with st.chat_message("assistant"):
-                with st.spinner("Hajni gondolkodik..."):
+                with st.spinner("Piri gondolkodik..."):
                     response = claude_client.messages.create(
-                        model="claude-3-5-sonnet-20241022",
-                        max_tokens=4000,
-                        messages=context_messages
-                    )
-                    answer = response.content.text
+    model="claude-haiku-4-5",
+    max_tokens=4000,
+    messages=context_messages
+)
+
+                    answer = response.content[0].text
                     st.write(answer)
             save_message(current_project_id, "assistant", answer)
             st.rerun()
