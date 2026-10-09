@@ -1,20 +1,21 @@
 import streamlit as st
 import requests
+import json
 from anthropic import Anthropic
 
-# Kulcsok betöltése és letisztítása
+# Kulcsok betöltése és drasztikus letisztítása (eltávolítjuk a TOML idézőjeleket és aposztrófokat)
 try:
-    SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().replace("'", "").replace('"', '')
-    SUPABASE_KEY = str(st.secrets["SUPABASE_KEY"]).strip().replace("'", "").replace('"', '')
-    ANTHROPIC_API_KEY = str(st.secrets["ANTHROPIC_API_KEY"]).strip().replace("'", "").replace('"', '')
+    SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().strip("'").strip('"')
+    SUPABASE_KEY = str(st.secrets["SUPABASE_KEY"]).strip().strip("'").strip('"')
+    ANTHROPIC_API_KEY = str(st.secrets["ANTHROPIC_API_KEY"]).strip().strip("'").strip('"')
 except Exception as e:
     st.error("Hiba! Hiányzik a secrets.toml vagy hibásak a kulcsok.")
     st.stop()
 
-# Anthropic kliens inicializálása
+# Anthropic kliens inicializálása a tiszta kulccsal
 claude_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# Supabase kézi fejléc beállítása (ezzel kikerüljük a hibás Supabase könyvtárat!)
+# Supabase kézi fejléc tisztán, nyers szövegként
 headers = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -24,21 +25,30 @@ headers = {
 
 st.set_page_config(page_title="Hajni2 Asszisztens", layout="wide")
 
-# --- KÉZI ADATBÁZIS MŰVELETEK (REST API) ---
+# --- KÉZI ADATBÁZIS MŰVELETEK (HIBAKEZELÉSSEL) ---
 def get_projects(status="active"):
     try:
         url = f"{SUPABASE_URL}/rest/v1/projects?status=eq.{status}&order=created_at.desc"
         response = requests.get(url, headers=headers)
-        return response.json() if response.status_code == 200 else []
-    except Exception:
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.sidebar.error(f"Hiba az adatok lekérésekor: {response.status_code}")
+            return []
+    except Exception as e:
+        st.sidebar.error(f"Kapcsolódási hiba: {e}")
         return []
 
 def create_project(name):
     if name.strip():
         url = f"{SUPABASE_URL}/rest/v1/projects"
         data = {"name": name, "status": "active"}
-        requests.post(url, headers=headers, json=data)
-        st.rerun()
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code in:
+            st.success(f"Projekt sikeresen létrehozva!")
+            st.rerun()
+        else:
+            st.error(f"Nem sikerült menteni a Supabase-be. Kód: {response.status_code}, Válasz: {response.text}")
 
 def archive_project(project_id):
     url = f"{SUPABASE_URL}/rest/v1/projects?id=eq.{project_id}"
