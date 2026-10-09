@@ -1,4 +1,3 @@
-cat << 'EOF' > app.py
 import streamlit as st
 from supabase import create_client, Client
 from anthropic import Anthropic
@@ -90,5 +89,5 @@ if current_project_id:
         st.subheader("Generált folyamatábrák")
 else:
     st.write("### 👈 Kezdéshez válassz vagy hozz létre egy projektet a bal oldali sávban!")
-EOF
+
 
