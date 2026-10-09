@@ -64,7 +64,7 @@ MAX_FILE_MB = 10  # a tartalom Base64-ként az adatbázisban tárolódik, ezért
 def get_documents(project_id):
     """Az adott projekt dokumentumainak listája (tartalom nélkül)."""
     try:
-        url = (f"{SUPABASE_URL}/rest/v1/documents?project_id=eq.{project_id}"
+        url = (f"{SUPABASE_URL}/rest/v1/project_documents?project_id=eq.{project_id}"
                "&select=id,name,mime_type,size_bytes,created_at&order=created_at.desc")
         res = requests.get(url, headers=headers)
         if res.status_code == 200:
@@ -84,7 +84,7 @@ def save_document(project_id, uploaded_file):
     }
     try:
         # return=minimal: ne küldje vissza a teljes (nagy) sort
-        res = requests.post(f"{SUPABASE_URL}/rest/v1/documents",
+        res = requests.post(f"{SUPABASE_URL}/rest/v1/project_documents",
                             headers={**headers, "Prefer": "return=minimal"}, json=payload)
         return res.status_code in (200, 201, 204), res.text[:150]
     except Exception as e:
@@ -93,7 +93,7 @@ def save_document(project_id, uploaded_file):
 @st.cache_data(show_spinner=False, max_entries=10)
 def get_document_content(doc_id):
     """Egy dokumentum Base64 tartalma (a dokumentumok nem módosulnak, ezért gyorsítótárazható)."""
-    res = requests.get(f"{SUPABASE_URL}/rest/v1/documents?id=eq.{doc_id}&select=content_b64", headers=headers)
+    res = requests.get(f"{SUPABASE_URL}/rest/v1/project_documents?id=eq.{doc_id}&select=content_b64", headers=headers)
     rows = res.json() if res.status_code == 200 else []
     if not rows:
         raise RuntimeError("A dokumentum nem található.")
@@ -101,7 +101,7 @@ def get_document_content(doc_id):
 
 def delete_document(doc_id):
     try:
-        res = requests.delete(f"{SUPABASE_URL}/rest/v1/documents?id=eq.{doc_id}",
+        res = requests.delete(f"{SUPABASE_URL}/rest/v1/project_documents?id=eq.{doc_id}",
                               headers={**headers, "Prefer": "return=minimal"})
         return res.status_code in (200, 204)
     except Exception:
