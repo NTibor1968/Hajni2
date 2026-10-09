@@ -119,11 +119,12 @@ if current_project_id:
                 with st.spinner("Piri gondolkodik..."):
                     # Tiszta hívás a minden fiókban és régi csomagban is nyitott stabil Haiku modellnévvel
                     response = claude_client.messages.create(
-                        model="claude-3-5-haiku-20241022",
-                        max_tokens=4000,
-                        system=system_instruction,
-                        messages=context_messages
-                    )
+    model="claude-3-opus-20240229", # Ez az Opus modell hivatalos gyári neve, ami azonnal működni fog neked!
+    max_tokens=4000,
+    system=system_instruction,
+    messages=context_messages
+)
+
                     
                     answer = response.content[0].text
                     st.write(answer)
