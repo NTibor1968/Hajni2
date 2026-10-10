@@ -49,6 +49,9 @@ EXT_MIME = {
 STRETCH = ({"width": "stretch"} if "width" in inspect.signature(st.button).parameters
            else {"use_container_width": True})
 
+# A legördülő lista újabb Streamlitben saját, új értéket is elfogad (témaválasztáshoz)
+ACCEPT_NEW_OPTIONS = "accept_new_options" in inspect.signature(st.selectbox).parameters
+
 # --- KULCSOK BIZTONSÁGOS BETÖLTÉSE ---
 try:
     SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().strip("'").strip('"')
@@ -62,8 +65,35 @@ claude_client = Anthropic(api_key=ANTHROPIC_API_KEY.replace("'", "").replace('"'
 db.init(SUPABASE_URL, SUPABASE_KEY)
 
 # --- MEGJELENÉS ------------------------------------------------------------
+# NF Office arculat (arculati kézikönyv): címsor Fraunces, szöveg Poppins;
+# színek: #736974 (mályvaszürke), #333033 (sötét), #b2b1b2 (szürke), #f0edea (törtfehér).
+BRAND = "#736974"
+BRAND_DARK = "#333033"
+BRAND_LIGHT = "#f0edea"
+
 CSS = f"""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Poppins:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
+
+/* betűtípusok (az ikonok saját betűkészlete érintetlen marad, mert azt az ikon eleme maga állítja be) */
+html, body, .stApp, .stApp input, .stApp textarea, .stApp button, .stApp select,
+[data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li,
+[data-testid="stWidgetLabel"] p {{ font-family: 'Poppins', 'Source Sans', 'Source Sans Pro', sans-serif !important; }}
+.piri-header, .piri-side-title.big,
+[data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3 {{
+    font-family: 'Fraunces', Georgia, serif !important; color: {BRAND_DARK}; }}
+
+/* logó az oldalsáv tetején, körülötte szabadon hagyott térrel */
+.piri-logo {{ text-align: center; padding: .1rem 0 .7rem; }}
+.piri-logo img {{ width: 8.5rem; max-width: 70%; height: auto; }}
+
+/* az oldalsáv saját címei (a beépített címsorokra rácsúszott az alattuk lévő elem) */
+.piri-side-title {{ font-weight: 600; font-size: 1rem; line-height: 1.4; margin: .1rem 0 0; color: {BRAND_DARK}; }}
+.piri-side-title.big {{ font-size: 1.2rem; font-weight: 500; }}
+
+/* feladatok: a lezárt (kész, elavult, törölt) tételek halványan, áthúzva */
+.piri-task-done {{ text-decoration: line-through; opacity: .5; }}
+
 /* kevesebb üres hely az oldal tetején és alján, hogy a beszélgetés kitöltse a képernyőt */
 .block-container, [data-testid="stMainBlockContainer"] {{ padding-top: 3.75rem !important; padding-bottom: 1rem !important; }}
 
@@ -86,9 +116,9 @@ hr {{ margin: .5rem 0 !important; }}
     min-height: 1.7rem !important; padding: 0 .45rem !important; }}
 
 /* keskeny, mindig látható fejlécsor */
-.piri-header {{ font-size: 1.15rem; font-weight: 600; line-height: 2.5rem; white-space: nowrap;
+.piri-header {{ font-size: 1.25rem; font-weight: 500; line-height: 2.5rem; white-space: nowrap;
                overflow: hidden; text-overflow: ellipsis; }}
-.piri-header .sep {{ margin: 0 .6rem; opacity: .35; font-weight: 400; }}
+.piri-header .sep {{ margin: 0 .6rem; opacity: .35; font-weight: 400; color: {BRAND}; }}
 .piri-header .badge {{ margin-left: .5rem; font-size: .85rem; font-weight: 400; opacity: .7; }}
 
 /* kisebb címsorok Piri válaszaiban és az előnézetekben (a törzsszöveg változatlan) */
@@ -130,6 +160,38 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-search_box) 
 .piri-hit mark, .piri-header mark {{ background: #ffe58a; color: inherit; padding: 0 .12em; border-radius: 3px; }}
 </style>
 """
+
+
+LOGO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "nf_office_logo.svg")
+
+
+@st.cache_data(show_spinner=False)
+def logo_data_uri(color):
+    """Az NF Office logó a megadott arculati színben, képként beágyazható formában (üres, ha a fájl hiányzik)."""
+    try:
+        with open(LOGO_FILE, encoding="utf-8") as fh:
+            svg = fh.read()
+    except OSError:
+        return ""
+    svg = svg.replace("#b0afb0", color)
+    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
+
+
+def side_title(text, big=False):
+    st.markdown(f'<div class="piri-side-title{" big" if big else ""}">{html.escape(text)}</div>',
+                unsafe_allow_html=True)
+
+
+def topic_input(container, label, topics, value=None, key=None):
+    """Téma megadása: gépelés közben a meglévő témák közül ajánl, de új is beírható.
+    (Régebbi Streamlitnél sima szövegmező.)"""
+    if topics and ACCEPT_NEW_OPTIONS:
+        options = list(dict.fromkeys(topics + ([value] if value else [])))
+        return container.selectbox(label, options=options, index=options.index(value) if value else None,
+                                   placeholder="válassz, vagy írj be újat", accept_new_options=True, key=key)
+    if value is None:
+        return container.text_input(label, placeholder="pl. Vízhálózat", key=key)
+    return container.text_input(label, value=value, key=key)
 
 
 def inject_css():
@@ -1111,17 +1173,18 @@ def render_task_row(task, readonly, all_tasks):
     status = task_status(task)
     nonce = st.session_state.get("task_edit_nonce", 0)
     editing = not readonly and st.session_state.get("task_editing") == tid
-    c_chk, c_title, c_status, c_edit, c_del = st.columns([0.35, 6, 2.2, 0.5, 0.5], gap="small",
+    c_chk, c_title, c_status, c_edit, c_del = st.columns([0.35, 7, 1.7, 0.45, 0.45], gap="small",
                                                          vertical_alignment="center")
     # a kulcsban benne van az állapot, így módosítás után a pipa és a lista a friss értéket mutatja
     chk_key = f"task_chk_{tid}_{status}"
     c_chk.checkbox("Elvégezve", value=status != "open", key=chk_key, label_visibility="collapsed",
                    disabled=readonly, on_change=_task_checked, args=(tid, chk_key))
-    c_title.write(task["title"])
+    title_class = "piri-task" if status in TASK_ACTIVE else "piri-task-done"
+    c_title.markdown(f'<span class="{title_class}">{html.escape(task["title"])}</span>', unsafe_allow_html=True)
     if task.get("note"):
         c_title.caption(f"📝 {task['note']}")
     if status == "open":
-        c_status.caption("nyitott – nálunk a labda")
+        c_status.caption("nálunk a labda")
     else:
         st_key = f"task_st_{tid}_{status}"
         c_status.selectbox("Állapot", options=list(TASK_CHECKED), index=TASK_CHECKED.index(status),
@@ -1139,7 +1202,8 @@ def render_task_row(task, readonly, all_tasks):
         st.rerun()
     if editing:
         e1, e2 = st.columns([1, 2])
-        new_topic = e1.text_input("Téma", value=task_topic(task), key=f"task_e_topic_{tid}_{nonce}")
+        new_topic = topic_input(e1, "Téma", list(dict.fromkeys(task_topic(t) for t in all_tasks)),
+                                value=task_topic(task), key=f"task_e_topic_{tid}_{nonce}")
         new_title = e2.text_input("Tennivaló", value=task["title"], key=f"task_e_title_{tid}_{nonce}")
         new_note = st.text_input("Megjegyzés", value=task.get("note") or "", key=f"task_e_note_{tid}_{nonce}",
                                  placeholder="pl. kire várunk, vagy miért nem kell elvégezni")
@@ -1182,7 +1246,7 @@ def render_tasks_tab(project, readonly, tasks):
             with st.expander("➕ Új feladat"):
                 with st.form(f"task_add_{pid}", clear_on_submit=True):
                     f1, f2 = st.columns([1, 2])
-                    topic = f1.text_input("Téma", placeholder="pl. Vízhálózat")
+                    topic = topic_input(f1, "Téma", topics)
                     title = f2.text_input("Tennivaló", placeholder="pl. Gépésznek megírni a specifikációt")
                     note = st.text_input("Megjegyzés (nem kötelező)")
                     if st.form_submit_button("Felvétel"):
@@ -1195,7 +1259,7 @@ def render_tasks_tab(project, readonly, tasks):
                                 st.error(f"A felvétel nem sikerült: {e}")
                             else:
                                 st.rerun()
-                if topics:
+                if topics and not ACCEPT_NEW_OPTIONS:
                     st.caption("Meglévő témák: " + ", ".join(topics))
 
         hidden = [t for t in tasks if task_status(t) not in TASK_ACTIVE]
@@ -1210,10 +1274,14 @@ def render_tasks_tab(project, readonly, tasks):
             rows = [t for t in visible if task_topic(t) == topic]
             if not rows:
                 continue
-            st.divider()
-            st.markdown(f"**{topic}**")
-            for task in rows:
-                render_task_row(task, readonly, tasks)
+            n_open = sum(1 for t in rows if task_status(t) == "open")
+            n_wait = sum(1 for t in rows if task_status(t) == "waiting")
+            counts = [f"{n_open} nyitott"] + ([f"{n_wait} válaszra vár"] if n_wait else [])
+            if show_all and len(rows) > n_open + n_wait:
+                counts.append(f"{len(rows) - n_open - n_wait} lezárt")
+            with st.expander(f"**{topic}** · " + ", ".join(counts), expanded=True):
+                for task in rows:
+                    render_task_row(task, readonly, tasks)
 
 
 # --- KERESÉS -----------------------------------------------------------------
@@ -1357,6 +1425,9 @@ def _search_changed():
 
 # --- OLDALSÁV (SIDEBAR) ---
 with st.sidebar:
+    _logo = logo_data_uri(BRAND)
+    if _logo:
+        st.markdown(f'<div class="piri-logo"><img src="{_logo}" alt="NF Office"></div>', unsafe_allow_html=True)
     st.text_input("🔎 Keresés", key="search_q", on_change=_search_changed,
                   placeholder="keresés dokumentumokban és összefoglalókban",
                   help="Az aktív projektek dokumentumaiban és összefoglalóiban keres. Enterrel indul.")
@@ -1379,7 +1450,7 @@ with st.sidebar:
                     st.rerun()
 
     st.divider()
-    st.header("🗂️ Projektek")
+    side_title("Projektek", big=True)
 
     with st.form("project_form", clear_on_submit=True):
         new_project_name = st.text_input("Új téma / projekt neve:")
@@ -1396,7 +1467,7 @@ with st.sidebar:
                 st.rerun()
 
     if active_projects:
-        st.subheader("Aktív ügyek")
+        side_title("Aktív ügyek")
         for p in active_projects:
             if st.button(p["name"], key=f"proj_{p['id']}", type="primary" if p["id"] == current_id else "secondary",
                          **STRETCH):
@@ -1455,7 +1526,7 @@ else:
     right_html = ""
 col_title, col_back = st.columns([6, 2])
 col_title.markdown(
-    '<div class="piri-header">🤖 Piri AI Munkaállomás'
+    '<div class="piri-header">Piri asszisztens'
     + (f'<span class="sep">|</span>{right_html}' if right_html else "") + "</div>",
     unsafe_allow_html=True)
 if search_query and not in_search:
