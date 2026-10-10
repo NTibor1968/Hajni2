@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import hmac
 import html
 import inspect
@@ -1403,12 +1404,15 @@ def _login_failures():
 
 
 def require_login():
-    if st.session_state.get("auth_ok") is True:
-        return
     try:
         expected = str(st.secrets.get("APP_PASSWORD", "")).strip()
     except Exception:
         expected = ""
+    # A belépés a jelszó lenyomatához kötött: ha a jelszót lecserélik, minden korábbi belépés érvényét veszti.
+    fingerprint = hashlib.sha256(("piri:" + expected).encode("utf-8")).hexdigest()
+    if expected and st.session_state.get("auth_ok") == fingerprint:
+        return
+    st.session_state.pop("auth_ok", None)
     st.markdown('<div class="piri-header">Piri asszisztens</div>', unsafe_allow_html=True)
     if not expected:
         st.error("Az alkalmazás zárva van, mert nincs beállítva belépési jelszó.")
@@ -1427,7 +1431,7 @@ def require_login():
     if submitted:
         time.sleep(1)  # lassítja a próbálgatást
         if hmac.compare_digest(password.encode("utf-8"), expected.encode("utf-8")):
-            st.session_state["auth_ok"] = True
+            st.session_state["auth_ok"] = fingerprint
             st.rerun()
         failures.append(time.time())
         st.error("Hibás jelszó.")

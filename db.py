@@ -29,7 +29,8 @@ class DbError(Exception):
 
 # Jogosultsági szabály (RLS) mellett a tiltott módosítás vagy törlés nem ad hibát, csak nulla sort érint,
 # ezért ezt külön ellenőrizzük, hogy az alkalmazás ne állítson olyat, ami nem történt meg.
-NOT_APPLIED = "az adatbázis nem hajtotta végre a műveletet (valószínűleg jogosultság hiányzik); futtasd le a schema.sql-t."
+NOT_APPLIED = ("az adatbázis nem hajtotta végre a műveletet (valószínűleg jogosultság hiányzik): ellenőrizd, hogy a "
+               "SUPABASE_KEY a service_role (secret) kulcs-e, és futtasd le a schema.sql-t.")
 
 
 def init(url, key):
@@ -44,7 +45,8 @@ def now_iso():
 
 def _explain(res):
     if "42501" in res.text or "row-level security" in res.text:
-        return "a Supabase jogosultsági szabálya (RLS) elutasította a műveletet; futtasd le a schema.sql-t."
+        return ("a Supabase jogosultsági szabálya elutasította a műveletet. Az alkalmazásnak a service_role "
+                "(secret) kulcsot kell használnia: ellenőrizd a SUPABASE_KEY titkos beállítást, majd futtasd le a schema.sql-t.")
     return f"{res.status_code}: {res.text[:300]}"
 
 

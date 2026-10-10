@@ -82,27 +82,27 @@ create index if not exists message_attachments_project_idx on public.message_att
 create index if not exists message_attachments_message_idx on public.message_attachments (message_id);
 create index if not exists project_tasks_project_idx on public.project_tasks (project_id, created_at);
 
--- 4. Jogosultságok: az alkalmazás kulcsa olvashassa és írhassa az öt táblát.
---    (Az új funkciókhoz a régi tábláknál is kell módosítás és törlés: sorrend, lezárás,
---    projekt törlése, előzmények törlése, dokumentumok feldolgozása a kereséshez.)
-alter table public.project_summaries enable row level security;
-alter table public.message_attachments enable row level security;
-alter table public.project_tasks enable row level security;
-
-grant select, insert, update, delete
-   on public.projects, public.messages, public.project_documents,
-      public.project_summaries, public.message_attachments, public.project_tasks
-   to anon, authenticated, service_role;
-
+-- 4. Jogosultságok: a táblákat kizárólag az alkalmazás szerveroldali kulcsa érheti el
+--    (Supabase: "service_role", az új elnevezés szerint "secret" kulcs). A nyilvános ("anon", "publishable")
+--    kulcs semmit nem olvashat és nem írhat, így az adatbázis az alkalmazás megkerülésével sem érhető el.
+--    FONTOS: előbb állítsd át az alkalmazás SUPABASE_KEY titkos beállítását a service_role kulcsra,
+--    és csak utána futtasd ezt a szkriptet, különben az alkalmazás nem éri el az adatbázist.
 do $$
 declare
   t text;
+  p record;
 begin
-  foreach t in array array['projects', 'messages', 'project_documents', 'project_summaries', 'message_attachments', 'project_tasks']
+  foreach t in array array['projects', 'messages', 'project_documents', 'project_summaries',
+                           'message_attachments', 'project_tasks']
   loop
-    execute format('drop policy if exists piri_app_access on public.%I', t);
-    execute format(
-      'create policy piri_app_access on public.%I for all to anon, authenticated using (true) with check (true)', t);
+    execute format('alter table public.%I enable row level security', t);
+    -- minden korábbi szabály törlése (szabály nélkül csak a service_role fér hozzá, mert rá az RLS nem vonatkozik)
+    for p in select policyname from pg_policies where schemaname = 'public' and tablename = t
+    loop
+      execute format('drop policy %I on public.%I', p.policyname, t);
+    end loop;
+    execute format('revoke all on public.%I from anon, authenticated', t);
+    execute format('grant select, insert, update, delete on public.%I to service_role', t);
   end loop;
 end $$;
 
