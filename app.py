@@ -4,6 +4,9 @@ import base64
 from datetime import date
 from anthropic import Anthropic
 
+import chat_flow
+import export_tools as ex
+
 # Kényszerített oldal konfiguráció a legelső sorban
 st.set_page_config(page_title="Piri Asszisztens", layout="wide")
 
@@ -74,13 +77,13 @@ def get_documents(project_id):
         st.warning(f"A dokumentumlista nem tölthető be: {e}")
     return []
 
-def save_document(project_id, uploaded_file):
+def save_document_bytes(project_id, name, mime_type, data):
     payload = {
         "project_id": project_id,
-        "name": uploaded_file.name,
-        "mime_type": uploaded_file.type,
-        "size_bytes": uploaded_file.size,
-        "content_b64": base64.b64encode(uploaded_file.getvalue()).decode("utf-8"),
+        "name": name,
+        "mime_type": mime_type,
+        "size_bytes": len(data),
+        "content_b64": base64.b64encode(data).decode("utf-8"),
     }
     try:
         # return=minimal: ne küldje vissza a teljes (nagy) sort
@@ -90,7 +93,10 @@ def save_document(project_id, uploaded_file):
     except Exception as e:
         return False, str(e)
 
-@st.cache_data(show_spinner=False, max_entries=10)
+def save_document(project_id, uploaded_file):
+    return save_document_bytes(project_id, uploaded_file.name, uploaded_file.type, uploaded_file.getvalue())
+
+@st.cache_data(show_spinner=False, max_entries=20)
 def get_document_content(doc_id):
     """Egy dokumentum Base64 tartalma (a dokumentumok nem módosulnak, ezért gyorsítótárazható)."""
     res = requests.get(f"{SUPABASE_URL}/rest/v1/project_documents?id=eq.{doc_id}&select=content_b64", headers=headers)
@@ -106,6 +112,36 @@ def delete_document(doc_id):
         return res.status_code in (200, 204)
     except Exception:
         return False
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def export_markdown(doc_id, fmt, title):
+    """A Piri által készített Markdown dokumentum átalakítása Word vagy PDF formátumra."""
+    text = base64.b64decode(get_document_content(doc_id)).decode("utf-8", errors="replace")
+    return ex.markdown_to_docx(text, title) if fmt == "docx" else ex.markdown_to_pdf(text, title)
+
+def is_markdown_doc(doc):
+    return doc["mime_type"] == ex.MD_MIME or doc["name"].lower().endswith(".md")
+
+def render_downloads(doc):
+    """Letöltőgombok egy dokumentumhoz (a tartalom csak itt, igény szerint töltődik be)."""
+    try:
+        data = base64.b64decode(get_document_content(doc["id"]))
+    except Exception:
+        st.warning("A dokumentum nem tölthető be.")
+        return
+    base_name = doc["name"].rsplit(".", 1)[0]
+    is_md = is_markdown_doc(doc)
+    cols = st.columns(3 if is_md else 1)
+    cols[0].download_button(f"⬇️ {doc['name']}", data=data, file_name=doc["name"],
+                            mime=doc["mime_type"], key=f"dlb_{doc['id']}")
+    if is_md:
+        for col, (label, fmt, mime) in zip(cols[1:], (("⬇️ Word (.docx)", "docx", ex.DOCX_MIME),
+                                                      ("⬇️ PDF", "pdf", ex.PDF_MIME))):
+            try:
+                col.download_button(label, data=export_markdown(doc["id"], fmt, base_name),
+                                    file_name=f"{base_name}.{fmt}", mime=mime, key=f"dlb_{fmt}_{doc['id']}")
+            except Exception as e:
+                col.warning(f"A(z) {fmt.upper()} nem készíthető el: {e}")
 
 # --- OLDALSÁV (SIDEBAR) ---
 with st.sidebar:
@@ -139,7 +175,7 @@ if current_project_id:
 
     with tab_docs:
         st.subheader(f"📁 A(z) „{valasztott_nev}” projekt dokumentumtára")
-        st.write("Az itt tárolt dokumentumok (TXT, PDF) és képek (PNG, JPG) kizárólag ehhez a projekthez tartoznak, más projektben nem jelennek meg.")
+        st.write("Az itt tárolt dokumentumok (TXT, PDF), képek (PNG, JPG) és a Piri által készített fájlok (szöveges dokumentum, Excel, PowerPoint) kizárólag ehhez a projekthez tartoznak, más projektben nem jelennek meg.")
 
         flash = st.session_state.pop("docs_flash", None)
         if flash:
@@ -179,20 +215,33 @@ if current_project_id:
         if not project_docs:
             st.info("Ebben a projektben még nincs dokumentum.")
         for doc in project_docs:
-            is_image = doc["mime_type"].startswith("image/")
-            col_info, col_prev, col_del = st.columns([6, 2, 1])
+            mime = doc["mime_type"]
+            is_image = mime.startswith("image/")
+            is_md = is_markdown_doc(doc)
+            icon = ("🖼️" if is_image else "📝" if is_md else "📊" if mime == ex.XLSX_MIME
+                    else "📽️" if mime == ex.PPTX_MIME else "📄")
+            col_info, col_dl, col_prev, col_del = st.columns([5, 1.7, 1.7, 0.8])
             size_kb = max(1, round((doc.get("size_bytes") or 0) / 1024))
-            col_info.write(f"{'🖼️' if is_image else '📄'} **{doc['name']}** · {size_kb} KB · {str(doc.get('created_at', ''))[:10]}")
-            if is_image and col_prev.checkbox("Előnézet", key=f"prev_{doc['id']}"):
-                try:
-                    st.image(base64.b64decode(get_document_content(doc["id"])), caption=doc["name"], width=400)
-                except Exception:
-                    st.warning("Az előnézet nem tölthető be.")
+            col_info.write(f"{icon} **{doc['name']}** · {size_kb} KB · {str(doc.get('created_at', ''))[:10]}")
+            want_download = col_dl.checkbox("Letöltés", key=f"dl_{doc['id']}")
+            want_preview = (is_image or is_md) and col_prev.checkbox("Előnézet", key=f"prev_{doc['id']}")
             if col_del.button("🗑️", key=f"del_{doc['id']}", help="Dokumentum törlése a projektből"):
                 if delete_document(doc["id"]):
                     st.rerun()
                 else:
                     st.error("A törlés nem sikerült.")
+            if want_download:
+                render_downloads(doc)
+            if want_preview:
+                try:
+                    raw = base64.b64decode(get_document_content(doc["id"]))
+                    if is_image:
+                        st.image(raw, caption=doc["name"], width=400)
+                    else:
+                        with st.container(border=True):
+                            st.markdown(raw.decode("utf-8", errors="replace"))
+                except Exception:
+                    st.warning("Az előnézet nem tölthető be.")
     
     with tab_chat:
         st.subheader(f"Folyamatban lévő ügy: {valasztott_nev}")
@@ -261,6 +310,15 @@ if current_project_id:
                     string_data = base64.b64decode(b64_data).decode("utf-8", errors="replace")
                     text_attachments.append(f"[Mellékelt fájl tartalma ({doc['name']}):\n{string_data}]")
 
+                # Excel / PowerPoint / Word: szöveggé alakítva (a képletek is látszanak)
+                elif mime in (ex.XLSX_MIME, ex.PPTX_MIME, ex.DOCX_MIME):
+                    try:
+                        office_text = ex.office_to_text(mime, base64.b64decode(b64_data))
+                    except Exception:
+                        office_text = None
+                    if office_text:
+                        text_attachments.append(f"[Mellékelt fájl tartalma ({doc['name']}):\n{office_text}]")
+
             if text_attachments:
                 user_input = "\n\n".join(text_attachments) + f"\n\n{user_input}"
 
@@ -273,57 +331,51 @@ if current_project_id:
             
             # SYSTEM PROMPT A GYÖNYÖRŰ MAGYAR JOGI NYELVÉRT
             system_instruction = (
-                "Te egy professzionális, rendkívül tájékozott általános cégvezetői AI asszisztens vagy, "
+                "Te egy professzionális, rendkívül intelligens és precíz jogi és törvényelemző AI asszisztens vagy, "
                 "akit Piritának (vagy röviden Pirinek) hívnak. Feladatod, hogy a felhasználót maximális szakértelemmel, "
-                "részletesen, ugyanakkor teljesen érthetően segítsd az adózási, vállalkozási és bonyolult jogi ügyekben, műszaki ügyekben, "
-                "pénzügyekben elemzésekben, dokumentációk, folyamatábrák készítésében.\n"
-                "Képes vagy képek, képernyőképek, alaprajzok, műszaki rajzok és dokumentumok elemzésére is. Ha a felhasználó képet küld, "
+                "részletesen, ugyanakkor teljesen érthetően segítsd az adózási, vállalkozási és bonyolult jogi ügyekben.\n"
+                "Képes vagy képek, képernyőképek és dokumentumok elemzésére is. Ha a felhasználó képet küld, "
                 "elemezd azt tűpontosan és válaszolj a kérdéseire.\n\n"
                 "KÖTELEZŐEN BETARTANDÓ SZABÁLYOK:\n"
                 "1. Kizárólag tökéletes, érett, szakmailag hiteles és nyelvtanilag teljesen hibátlan MAGYAR nyelven válaszolj!\n"
                 "2. Kerüld a tükörfordításokat és az angolos, mesterkélt kifejezéseket. Fogalmazz úgy, mint egy tapasztalt hazai tanácsadó.\n"
                 "3. A válaszaid legyenek alaposak és strukturáltak. Használj vastag betűs kiemeléseket és listákat.\n"
-                "4. Ne siesd el a választ, fejtsd ki részletesen a pontokat!"
-                "Adhatsz tippeket is, de jelezd, hogy az inkább csak tipp.\n\n"
+                "4. Ne siesd el a választ, fejtsd ki részletesen a pontokat!\n\n"
                 "INTERNETES KERESÉS:\n"
                 f"A mai dátum: {date.today().isoformat()}. Van internetes keresési lehetőséged. "
                 "A tudásod egy jóval korábbi időpontig tart, ezért a hatályos jogszabályokra, adómértékekre, határidőkre, "
                 "díjakra, hatósági szabályokra és minden aktuális adatra keress rá, mielőtt válaszolsz, még ha biztosnak is érzed magad. "
                 "Magyar jogi és adózási kérdésekben elsősorban hivatalos forrásokat használj (pl. njt.hu, nav.gov.hu, magyarkozlony.hu). "
-                "A válaszban jelöld meg, mely forrásokra támaszkodtál."
+                "A válaszban jelöld meg, mely forrásokra támaszkodtál.\n\n"
+                "DOKUMENTUMKÉSZÍTÉS:\n"
+                "Ha a felhasználó dokumentum, táblázat vagy prezentáció készítését kéri, használd a megfelelő eszközt: "
+                "create_document (szöveges dokumentum, amelyet a felhasználó Word, PDF vagy Markdown formátumban tölt le), "
+                "create_spreadsheet (Excel táblázat, amelyben a számolt értékek képletek, a számok pedig megfelelő "
+                "számformátumúak legyenek, hogy a felhasználó tovább tudjon dolgozni vele), "
+                "create_presentation (PowerPoint). Egyszerű kérdésre ne készíts fájlt, arra a chatben válaszolj. "
+                "A fájl elkészítése után röviden írd le, mit tartalmaz és mire kell figyelni; a letöltés a "
+                "Dokumentumok fülön történik. A korábban elkészült fájlok tartalmát a mellékelt dokumentumok között látod; "
+                "módosítást új fájl készítésével végezz, és jelezd, hogy új változat készült. "
+                "Ha egy állítás bizonytalan vagy ellenőrzést igényel, a dokumentumban is jelöld."
             )
 
-            # Beépített webes kereső eszköz (az Anthropic szerverein fut)
-            tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+            # Eszközök: a beépített webes kereső (az Anthropic szerverein fut) és a dokumentumkészítők (nálunk futnak)
+            tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}] + ex.TOOLS
 
             with st.chat_message("assistant"):
                 with st.spinner("Piri elemzi a tartalmat, keres és gondolkodik..."):
-                    answer_parts = []
-                    sources = {}
-
-                    # A szerveroldali keresés megszakadhat (pause_turn), ilyenkor folytatjuk a választ
-                    for _ in range(3):
-                        response = claude_client.messages.create(
-                            model="claude-haiku-5-5",  # A Claude Haiku 3.5 2026.02.19-én kivezetésre került
-                            max_tokens=16000,
-                            system=system_instruction,
-                            messages=api_messages,
-                            tools=tools
-                        )
-
-                        # Az új modellek gondolkodási (thinking) és keresési blokkot is visszaadhatnak, ezért csak a szöveges blokkokat vesszük
-                        for block in response.content:
-                            if block.type == "text":
-                                answer_parts.append(block.text)
-                                for citation in block.citations or []:
-                                    if getattr(citation, "url", None):
-                                        sources[citation.url] = citation.title or citation.url
-
-                        if response.stop_reason != "pause_turn":
-                            break
-                        api_messages.append({"role": "assistant", "content": response.content})
-
-                    answer = "".join(answer_parts)
+                    answer, sources, created_files = chat_flow.run_conversation(
+                        claude_client,
+                        "claude-haiku-5-5",  # A Claude Haiku 3.5 2026.02.19-én kivezetésre került
+                        system_instruction,
+                        api_messages,
+                        tools,
+                        lambda name, mime, data: save_document_bytes(current_project_id, name, mime, data),
+                    )
+                    answer = answer or "(Piri most nem adott szöveges választ.)"
+                    if created_files:
+                        answer += ("\n\n📎 **Elkészült:** " + ", ".join(f"`{n}`" for n in created_files)
+                                   + " – a **Dokumentumok** fülön tölthető le.")
                     if sources:
                         answer += "\n\n**Források:**\n" + "\n".join(f"- [{title}]({url})" for url, title in sources.items())
                     st.write(answer)

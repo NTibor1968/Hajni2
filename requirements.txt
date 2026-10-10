@@ -2,3 +2,8 @@ streamlit
 supabase
 anthropic
 pydantic
+openpyxl
+python-pptx
+python-docx
+reportlab
+markdown-it-py
