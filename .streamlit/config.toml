@@ -1,0 +1,4 @@
+# A felület megjelenése. Az alap betűméret képpontban (a Streamlit alapértéke 16);
+# ehhez igazodik az egész alkalmazás: szöveg, gombok, térközök.
+[theme]
+baseFontSize = 14

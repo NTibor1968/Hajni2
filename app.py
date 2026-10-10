@@ -22,9 +22,9 @@ MODEL = "claude-haiku-5-5"  # A Claude Haiku 3.5 2026.02.19-én kivezetésre ker
 # A beszélgetés és a többi fül görgethető dobozának magassága. A doboz a böngészőablak magasságához
 # igazodik: ablakmagasság mínusz az alábbi képpontérték (fejléc, fülek, beviteli mező helye).
 # Ha a doboz alatt üres sáv marad, csökkentsd a számot; ha az oldal görgethetővé válik, növeld.
-CHAT_OFFSET_PX = 350    # Beszélgetés fül
-PANEL_OFFSET_PX = 230   # Dokumentumok és Összefoglalók fül
-SEARCH_OFFSET_PX = 175  # keresési találatok (itt nincsenek fülek)
+CHAT_OFFSET_PX = 310    # Beszélgetés fül
+PANEL_OFFSET_PX = 205   # Dokumentumok és Összefoglalók fül
+SEARCH_OFFSET_PX = 155  # keresési találatok (itt nincsenek fülek)
 FALLBACK_HEIGHT_PX = 520  # régebbi Streamlit esetén ez a fix magasság érvényes
 
 MAX_FILE_MB = 10   # a tartalom Base64-ként az adatbázisban tárolódik, ezért korlátozzuk a méretet
@@ -58,6 +58,22 @@ CSS = f"""
 <style>
 /* kevesebb üres hely az oldal tetején és alján, hogy a beszélgetés kitöltse a képernyőt */
 .block-container, [data-testid="stMainBlockContainer"] {{ padding-top: 3.75rem !important; padding-bottom: 1rem !important; }}
+
+/* TÖMÖREBB FELÜLET (az alap betűméretet a .streamlit/config.toml állítja: theme.baseFontSize) */
+/* kisebb térköz az egymás alatti elemek között, alacsonyabb gombok, vékonyabb elválasztók */
+[data-testid="stVerticalBlock"] {{ gap: .6rem; }}
+.stButton button, .stDownloadButton button, .stFormSubmitButton button, [data-testid="stPopover"] button {{
+    min-height: 2rem !important; padding: .15rem .75rem !important; }}
+hr {{ margin: .5rem 0 !important; }}
+[data-testid="stExpander"] summary {{ padding-top: .35rem !important; padding-bottom: .35rem !important; min-height: 0 !important; }}
+/* oldalsáv: kevesebb üres hely felül, kisebb címek */
+[data-testid="stSidebarHeader"] {{ height: auto !important; min-height: 2rem; padding-top: .5rem !important; padding-bottom: 0 !important; }}
+[data-testid="stSidebarUserContent"] {{ padding-top: .5rem !important; }}
+[data-testid="stSidebar"] h2 {{ font-size: 1.15rem !important; padding: .2rem 0 !important; }}
+[data-testid="stSidebar"] h3 {{ font-size: 1rem !important; padding: .2rem 0 .1rem !important; }}
+/* az összefoglalók apró szerkesztés- és törlésgombja */
+[class*="st-key-sum_editbtn_"] button, [class*="st-key-sum_delbtn_"] button {{
+    min-height: 1.7rem !important; padding: 0 .45rem !important; }}
 
 /* keskeny, mindig látható fejlécsor */
 .piri-header {{ font-size: 1.15rem; font-weight: 600; line-height: 2.5rem; white-space: nowrap;
@@ -861,7 +877,9 @@ def render_summaries_tab(project, readonly, summaries, messages):
             st.divider()
             edited = f" · szerkesztve: {fmt_dt(s['updated_at'])}" if s.get("updated_at") else ""
             editing = not readonly and st.session_state.get("sum_editing") == s["id"]
-            col_title, col_edit, col_del, _ = st.columns([4, 0.6, 0.6, 4.8], vertical_alignment="center")
+            # a két kis gomb közvetlenül a dátum mellett áll (szerkesztett összefoglalónál hosszabb a felirat)
+            col_title, col_edit, col_del, _ = st.columns([4.6 if edited else 2.1, 0.45, 0.45, 5], gap="small",
+                                                         vertical_alignment="center")
             col_title.markdown(f"**📋 {fmt_dt(s['created_at'])}**{edited}")
             if not readonly:
                 if col_edit.button("✏️", key=f"sum_editbtn_{s['id']}",
