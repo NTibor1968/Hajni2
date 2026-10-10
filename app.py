@@ -816,10 +816,38 @@ def render_docs_tab(project, readonly, project_docs):
 
 
 # --- ÖSSZEFOGLALÓK FÜL -------------------------------------------------------
+def _close_sum_delete_dialog():
+    st.session_state.pop("sum_delete_open", None)
+
+
+@dialog("Összefoglaló végleges törlése", _close_sum_delete_dialog)
+def sum_delete_dialog(summary):
+    st.write(f"Biztosan törlöd a(z) **{fmt_dt(summary['created_at'])}** időpontú összefoglalót?")
+    if summary.get("description"):
+        st.caption(summary["description"])
+    st.warning("A törlés végleges, nem vonható vissza. Amit ez az összefoglaló őrzött a törölt előzményekből, "
+               "azt Piri ezután nem fogja tudni.")
+    c1, c2 = st.columns(2)
+    if c1.button("🗑️ Igen, végleges törlés", type="primary", key="sum_delete_yes", **STRETCH):
+        try:
+            db.delete_summary(summary["id"])
+        except db.DbError as e:
+            st.error(f"A törlés nem sikerült: {e}")
+            return
+        if st.session_state.get("sum_editing") == summary["id"]:
+            st.session_state["sum_editing"] = None
+        st.session_state["sums_flash"] = ("success", "Az összefoglaló törölve.")
+        _close_sum_delete_dialog()
+        st.rerun()
+    if c2.button("Mégse", key="sum_delete_no", **STRETCH):
+        _close_sum_delete_dialog()
+        st.rerun()
+
+
 def render_summaries_tab(project, readonly, summaries, messages):
     with st.container(height=FALLBACK_HEIGHT_PX, border=False, key="sums_box"):
         st.caption("Az összefoglalók a törölt előzmények helyett őrzik a projekt lényegét; Piri mindegyiket "
-                   "megkapja. Összefoglaló csak a projekt törlésével törlődik.")
+                   "megkapja. A dátum melletti gombokkal szerkeszthetők és törölhetők.")
         show_flash("sums_flash")
         if not readonly:
             if messages:
@@ -832,11 +860,22 @@ def render_summaries_tab(project, readonly, summaries, messages):
         for s in reversed(summaries):  # a legfrissebb elöl
             st.divider()
             edited = f" · szerkesztve: {fmt_dt(s['updated_at'])}" if s.get("updated_at") else ""
-            st.markdown(f"**📋 {fmt_dt(s['created_at'])}**{edited}")
+            editing = not readonly and st.session_state.get("sum_editing") == s["id"]
+            col_title, col_edit, col_del, _ = st.columns([4, 0.6, 0.6, 4.8], vertical_alignment="center")
+            col_title.markdown(f"**📋 {fmt_dt(s['created_at'])}**{edited}")
+            if not readonly:
+                if col_edit.button("✏️", key=f"sum_editbtn_{s['id']}",
+                                   help="Szerkesztés bezárása (mentés nélkül)" if editing else "Szerkesztés"):
+                    st.session_state["sum_editing"] = None if editing else s["id"]
+                    st.session_state["sum_edit_nonce"] = edit_nonce + 1  # a mezők a tárolt szöveggel induljanak
+                    st.rerun()
+                if col_del.button("🗑️", key=f"sum_delbtn_{s['id']}", help="Összefoglaló törlése"):
+                    st.session_state["sum_delete_open"] = s["id"]
+                    st.rerun()
             st.write(s.get("description") or "(nincs leírás)")
             with st.expander("Teljes összefoglaló"):
                 st.markdown(s["content"])
-            if not readonly and st.toggle("✏️ Szerkesztés", key=f"sum_edit_{s['id']}_{edit_nonce}"):
+            if editing:
                 new_description = st.text_area("Rövid leírás", value=s.get("description") or "", height=90,
                                                key=f"sum_desc_{s['id']}_{edit_nonce}")
                 new_content = st.text_area("Összefoglaló (Markdown)", value=s["content"], height=320,
@@ -848,6 +887,7 @@ def render_summaries_tab(project, readonly, summaries, messages):
                         try:
                             db.update_summary(s["id"], new_description.strip(), new_content.strip())
                             st.session_state["sum_edit_nonce"] = edit_nonce + 1
+                            st.session_state["sum_editing"] = None
                             st.session_state["sums_flash"] = ("success", "Az összefoglaló módosítva.")
                             st.rerun()
                         except db.DbError as e:
@@ -1123,6 +1163,12 @@ elif current_project:
         compact_dialog(current_project, messages, atts_by_msg, summaries, project_docs)
     elif st.session_state.get("trim_open") == current_id and messages and not current_closed:
         trim_dialog(current_project, messages, atts_by_msg)
+    elif st.session_state.get("sum_delete_open") is not None and not current_closed:
+        doomed_summary = next((x for x in summaries if x["id"] == st.session_state["sum_delete_open"]), None)
+        if doomed_summary:
+            sum_delete_dialog(doomed_summary)
+        else:
+            _close_sum_delete_dialog()
 
     tab_chat, tab_docs, tab_sums = st.tabs(
         ["💬 Beszélgetés", "📄 Dokumentumok", "📋 Összefoglalók"])  # állandó feliratok, különben fülváltás lenne

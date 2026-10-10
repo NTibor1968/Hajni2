@@ -225,6 +225,12 @@ def update_summary(summary_id, description, content):
         raise DbError(NOT_APPLIED)
 
 
+def delete_summary(summary_id):
+    _request("DELETE", "project_summaries", {"id": f"eq.{summary_id}"}, prefer="return=minimal")
+    if _request("GET", "project_summaries", {"id": f"eq.{summary_id}", "select": "id"}):
+        raise DbError(NOT_APPLIED)
+
+
 # --- Keresés ---------------------------------------------------------------
 def search(project_ids, stems, limit=60):
     """Előszűrés: dokumentumok és összefoglalók, amelyek szövegében minden tő előfordul (a pontos, szavankénti
