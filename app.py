@@ -1,8 +1,10 @@
 import base64
+import hmac
 import html
 import inspect
 import os
 import re
+import time
 from datetime import date, datetime
 
 import streamlit as st
@@ -1388,10 +1390,55 @@ def index_old_documents(rows):
     return failed
 
 
+# --- BELÉPÉS ---------------------------------------------------------------
+# Az alkalmazás bizalmas anyagokat kezel, ezért jelszó nélkül semmit nem mutat és semmit nem tölt be.
+# A jelszó a Streamlit titkos beállításai között van (APP_PASSWORD); ha nincs megadva, az alkalmazás zárva marad.
+LOGIN_WINDOW_S = 15 * 60   # ennyi időn belül számoljuk a hibás próbálkozásokat
+LOGIN_MAX_FAILS = 10       # ennyi hibás próbálkozás után az ablak végéig senki nem léphet be
+
+
+@st.cache_resource
+def _login_failures():
+    return []  # a hibás próbálkozások időpontjai; minden látogatóra közös, így új böngészővel sem kerülhető meg
+
+
+def require_login():
+    if st.session_state.get("auth_ok") is True:
+        return
+    try:
+        expected = str(st.secrets.get("APP_PASSWORD", "")).strip()
+    except Exception:
+        expected = ""
+    st.markdown('<div class="piri-header">Piri asszisztens</div>', unsafe_allow_html=True)
+    if not expected:
+        st.error("Az alkalmazás zárva van, mert nincs beállítva belépési jelszó.")
+        st.write("A tulajdonos a Streamlit felületén, az alkalmazás **Settings → Secrets** részében adhatja meg, "
+                 "egy új sorban: `APP_PASSWORD = \"ide egy hosszú jelszó\"`. Mentés után az alkalmazás újraindul.")
+        st.stop()
+    failures = _login_failures()
+    now = time.time()
+    failures[:] = [t for t in failures if now - t < LOGIN_WINDOW_S]
+    if len(failures) >= LOGIN_MAX_FAILS:
+        st.error("Túl sok hibás próbálkozás. A belépés negyedóráig zárolva van.")
+        st.stop()
+    with st.form("login_form"):
+        password = st.text_input("Jelszó", type="password")
+        submitted = st.form_submit_button("Belépés", type="primary")
+    if submitted:
+        time.sleep(1)  # lassítja a próbálgatást
+        if hmac.compare_digest(password.encode("utf-8"), expected.encode("utf-8")):
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        failures.append(time.time())
+        st.error("Hibás jelszó.")
+    st.stop()
+
+
 # =============================================================================
 # AZ OLDAL FELÉPÍTÉSE
 # =============================================================================
 inject_css()
+require_login()
 
 # Az adatbázis ellenőrzése munkamenetenként egyszer: megvannak-e az új oszlopok és táblák
 if not st.session_state.get("schema_ok"):
@@ -1528,6 +1575,12 @@ with st.sidebar:
                 if col_delete.button(":material/delete: Törlés", key="proj_delete", **STRETCH):
                     st.session_state["delete_open"] = current_id
                     st.rerun()
+
+with st.sidebar:
+    st.divider()
+    if st.button(":material/logout: Kilépés", key="logout_btn", **STRETCH):
+        st.session_state.clear()
+        st.rerun()
 
 # --- FEJLÉC (mindig látható) ---
 search_query = st.session_state.get("search_q", "").strip()
