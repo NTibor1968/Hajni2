@@ -1,7 +1,8 @@
 import streamlit as st
 import requests
 import base64
-from datetime import date
+import re
+from datetime import date, datetime
 from anthropic import Anthropic
 
 import chat_flow
@@ -89,7 +90,12 @@ def save_document_bytes(project_id, name, mime_type, data):
         # return=minimal: ne küldje vissza a teljes (nagy) sort
         res = requests.post(f"{SUPABASE_URL}/rest/v1/project_documents",
                             headers={**headers, "Prefer": "return=minimal"}, json=payload)
-        return res.status_code in (200, 201, 204), res.text[:150]
+        if res.status_code in (200, 201, 204):
+            return True, ""
+        if "42501" in res.text or "row-level security" in res.text:
+            return False, ("a Supabase jogosultsági szabálya (RLS) elutasította a mentést: a project_documents "
+                           "táblához hiányzik az írást engedélyező policy.")
+        return False, f"{res.status_code}: {res.text[:300]}"
     except Exception as e:
         return False, str(e)
 
@@ -122,8 +128,9 @@ def export_markdown(doc_id, fmt, title):
 def is_markdown_doc(doc):
     return doc["mime_type"] == ex.MD_MIME or doc["name"].lower().endswith(".md")
 
-def render_downloads(doc):
-    """Letöltőgombok egy dokumentumhoz (a tartalom csak itt, igény szerint töltődik be)."""
+def render_downloads(doc, key_prefix=""):
+    """Letöltőgombok egy dokumentumhoz (a tartalom csak itt, igény szerint töltődik be).
+    A key_prefix azért kell, mert ugyanaz a dokumentum a chatben és a Dokumentumok fülön is megjelenhet."""
     try:
         data = base64.b64decode(get_document_content(doc["id"]))
     except Exception:
@@ -133,15 +140,57 @@ def render_downloads(doc):
     is_md = is_markdown_doc(doc)
     cols = st.columns(3 if is_md else 1)
     cols[0].download_button(f"⬇️ {doc['name']}", data=data, file_name=doc["name"],
-                            mime=doc["mime_type"], key=f"dlb_{doc['id']}")
+                            mime=doc["mime_type"], key=f"{key_prefix}dlb_{doc['id']}")
     if is_md:
         for col, (label, fmt, mime) in zip(cols[1:], (("⬇️ Word (.docx)", "docx", ex.DOCX_MIME),
                                                       ("⬇️ PDF", "pdf", ex.PDF_MIME))):
             try:
                 col.download_button(label, data=export_markdown(doc["id"], fmt, base_name),
-                                    file_name=f"{base_name}.{fmt}", mime=mime, key=f"dlb_{fmt}_{doc['id']}")
+                                    file_name=f"{base_name}.{fmt}", mime=mime,
+                                    key=f"{key_prefix}dlb_{fmt}_{doc['id']}")
             except Exception as e:
                 col.warning(f"A(z) {fmt.upper()} nem készíthető el: {e}")
+
+# --- A CHATBEN KÉSZÜLT FÁJLOK NYOMON KÖVETÉSE ---
+# Ezeket a sorokat az alkalmazás fűzi Piri válasza alá (nem Piri írja).
+CREATED_MARK = "📎 **Elkészült:**"
+PROBLEM_MARK = "⚠️ **Figyelem:**"
+
+def created_names(content):
+    """Az üzenet alá fűzött „Elkészült” sorból a fájlnevek."""
+    for line in str(content).splitlines():
+        if line.startswith(CREATED_MARK):
+            return list(dict.fromkeys(re.findall(r"`([^`]+)`", line)))
+    return []
+
+def strip_app_notes(content):
+    """Az alkalmazás által hozzáfűzött sorok nélkül adjuk vissza a választ Pirinek, különben utánozni kezdi
+    őket: „Elkészült”-et ír úgy, hogy valójában nem hívta meg a dokumentumkészítő eszközt."""
+    kept = [l for l in str(content).splitlines() if not l.startswith((CREATED_MARK, PROBLEM_MARK))]
+    return "\n".join(kept).strip() or "(A fájl elkészült.)"
+
+def find_doc(docs, name, not_after=None):
+    """A megadott nevű dokumentum; azonos nevűek közül az, amelyik az üzenet előtt utoljára készült."""
+    same = [d for d in docs if d["name"] == name]  # a lista a legújabbal kezdődik
+    if same and not_after:
+        try:
+            limit = datetime.fromisoformat(str(not_after))
+            for d in same:
+                if datetime.fromisoformat(str(d["created_at"])) <= limit:
+                    return d
+        except Exception:
+            pass
+    return same[0] if same else None
+
+def unique_name(name, taken):
+    """Ha már van ilyen nevű fájl a projektben, sorszámot kap (így az új változat nem keveredik a régivel)."""
+    if name not in taken:
+        return name
+    stem, _, ext = name.rpartition(".")
+    n = 2
+    while f"{stem}_{n}.{ext}" in taken:
+        n += 1
+    return f"{stem}_{n}.{ext}"
 
 # --- OLDALSÁV (SIDEBAR) ---
 with st.sidebar:
@@ -261,10 +310,45 @@ if current_project_id:
         
         messages = get_messages(current_project_id)
         if messages and isinstance(messages, list):
-            for msg in messages:
+            for i, msg in enumerate(messages):
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
-        
+                    if msg["role"] != "assistant":
+                        continue
+                    # A válaszban készült fájlok letöltése közvetlenül a chatből: a legutóbbi válasznál azonnal
+                    # látszanak a gombok, a régebbieknél pipára töltődnek be (hogy ne lassítsák az oldalt).
+                    msg_key = msg.get("id", i)
+                    for name in created_names(msg["content"]):
+                        doc = find_doc(project_docs, name, msg.get("created_at"))
+                        if not doc:
+                            st.caption(f"`{name}` nem található a dokumentumtárban.")
+                        elif i == len(messages) - 1 or st.checkbox(f"⬇️ {name} letöltése",
+                                                                   key=f"chat_dl_{msg_key}_{doc['id']}"):
+                            render_downloads(doc, key_prefix=f"chat_{msg_key}_")
+
+            # Ha Piri a dokumentumot a chatbe írta (fájl nélkül), egy kattintással letölthető fájl lesz belőle
+            last = messages[-1]
+            if last["role"] == "assistant" and not created_names(last["content"]):
+                saved_answers = st.session_state.setdefault("saved_answers", {})
+                answer_key = f"{current_project_id}:{last.get('id', len(messages))}"
+                if answer_key in saved_answers:
+                    saved_doc = find_doc(project_docs, saved_answers[answer_key])
+                    if saved_doc:
+                        render_downloads(saved_doc, key_prefix="saved_")
+                elif st.button("💾 A legutóbbi válasz mentése dokumentumként", key=f"save_answer_{answer_key}",
+                               help="Piri válasza a dokumentumtárba kerül, és Word, PDF vagy Markdown formátumban letölthető."):
+                    body = strip_app_notes(last["content"])
+                    heading = re.search(r"^#{1,3}\s+(.+)$", body, flags=re.MULTILINE)
+                    title = heading.group(1).strip("* ") if heading else f"Piri válasza {date.today().isoformat()}"
+                    file_name = unique_name(ex.safe_filename(title, "md"), {d["name"] for d in project_docs})
+                    ok, detail = save_document_bytes(current_project_id, file_name, ex.MD_MIME,
+                                                     (body + "\n").encode("utf-8"))
+                    if ok:
+                        saved_answers[answer_key] = file_name
+                        st.rerun()
+                    else:
+                        st.error(f"A mentés nem sikerült: {detail}")
+
         if user_input := st.chat_input("Kérdezz Piritól, vagy kérj elemzést a csatolt fájlra..."):
             with st.chat_message("user"):
                 st.write(user_input)
@@ -273,7 +357,11 @@ if current_project_id:
             
             api_messages = []
             if messages and isinstance(messages, list):
-                api_messages = [{"role": m["role"], "content": m["content"]} for m in messages if "role" in m]
+                api_messages = [
+                    {"role": m["role"],
+                     "content": strip_app_notes(m["content"]) if m["role"] == "assistant" else m["content"]}
+                    for m in messages if "role" in m
+                ]
             
             current_content = []
             text_attachments = []
@@ -353,8 +441,12 @@ if current_project_id:
                 "create_spreadsheet (Excel táblázat, amelyben a számolt értékek képletek, a számok pedig megfelelő "
                 "számformátumúak legyenek, hogy a felhasználó tovább tudjon dolgozni vele), "
                 "create_presentation (PowerPoint). Egyszerű kérdésre ne készíts fájlt, arra a chatben válaszolj. "
-                "A fájl elkészítése után röviden írd le, mit tartalmaz és mire kell figyelni; a letöltés a "
-                "Dokumentumok fülön történik. A korábban elkészült fájlok tartalmát a mellékelt dokumentumok között látod; "
+                "Fájl kizárólag az eszköz tényleges meghívásával jön létre: a kért dokumentum teljes szövegét ne a "
+                "chatbe írd, hanem az eszköznek add át, és soha ne állítsd, hogy egy fájl elkészült, ha az eszköz "
+                "ezt nem igazolta vissza. Nagyon hosszú anyagot bonts több fájlra, válaszonként egy eszközhívással. "
+                "A fájl elkészítése után röviden írd le, mit tartalmaz és mire kell figyelni; a letöltőgombokat az "
+                "alkalmazás teszi a válaszod alá, te ne írj letöltési hivatkozást vagy „Elkészült” sort. "
+                "A korábban elkészült fájlok tartalmát a mellékelt dokumentumok között látod; "
                 "módosítást új fájl készítésével végezz, és jelezd, hogy új változat készült. "
                 "Ha egy állítás bizonytalan vagy ellenőrzést igényel, a dokumentumban is jelöld."
             )
@@ -362,20 +454,33 @@ if current_project_id:
             # Eszközök: a beépített webes kereső (az Anthropic szerverein fut) és a dokumentumkészítők (nálunk futnak)
             tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}] + ex.TOOLS
 
+            taken_names = {d["name"] for d in project_docs}
+
+            def save_created_file(name, mime, data):
+                """Piri által készített fájl mentése; siker esetén a tárolt (egyedi) fájlnevet adja vissza."""
+                final_name = unique_name(name, taken_names)
+                ok, detail = save_document_bytes(current_project_id, final_name, mime, data)
+                if ok:
+                    taken_names.add(final_name)
+                return ok, (final_name if ok else detail)
+
             with st.chat_message("assistant"):
-                with st.spinner("Piri elemzi a tartalmat, keres és gondolkodik..."):
-                    answer, sources, created_files = chat_flow.run_conversation(
+                with st.spinner("Piri elemzi a tartalmat, keres és gondolkodik... (hosszabb dokumentumnál ez több perc is lehet)"):
+                    answer, sources, created_files, problems = chat_flow.run_conversation(
                         claude_client,
                         "claude-haiku-5-5",  # A Claude Haiku 3.5 2026.02.19-én kivezetésre került
                         system_instruction,
                         api_messages,
                         tools,
-                        lambda name, mime, data: save_document_bytes(current_project_id, name, mime, data),
+                        save_created_file,
                     )
                     answer = answer or "(Piri most nem adott szöveges választ.)"
+                    # A hibát az elmentett válaszba is beírjuk, mert az oldal rögtön újratöltődik
+                    if problems:
+                        answer += f"\n\n{PROBLEM_MARK} " + " ".join(problems)
                     if created_files:
-                        answer += ("\n\n📎 **Elkészült:** " + ", ".join(f"`{n}`" for n in created_files)
-                                   + " – a **Dokumentumok** fülön tölthető le.")
+                        answer += (f"\n\n{CREATED_MARK} " + ", ".join(f"`{n}`" for n in created_files)
+                                   + " – itt lent és a **Dokumentumok** fülön is letölthető.")
                     if sources:
                         answer += "\n\n**Források:**\n" + "\n".join(f"- [{title}]({url})" for url, title in sources.items())
                     st.write(answer)
