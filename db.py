@@ -105,6 +105,10 @@ def delete_project(project_id):
     """A projekt és minden hozzá tartozó adat végleges törlése."""
     for table in ("message_attachments", "messages", "project_documents", "project_summaries"):
         _request("DELETE", table, {"project_id": f"eq.{project_id}"}, prefer="return=minimal")
+    try:  # a feladatok táblája újabb; ha még nincs létrehozva, a projekt attól még törölhető
+        _request("DELETE", "project_tasks", {"project_id": f"eq.{project_id}"}, prefer="return=minimal")
+    except DbError:
+        pass
     _request("DELETE", "projects", {"id": f"eq.{project_id}"}, prefer="return=minimal")
     if _request("GET", "projects", {"id": f"eq.{project_id}", "select": "id"}):
         raise DbError(NOT_APPLIED)
@@ -228,6 +232,40 @@ def update_summary(summary_id, description, content):
 def delete_summary(summary_id):
     _request("DELETE", "project_summaries", {"id": f"eq.{summary_id}"}, prefer="return=minimal")
     if _request("GET", "project_summaries", {"id": f"eq.{summary_id}", "select": "id"}):
+        raise DbError(NOT_APPLIED)
+
+
+# --- Feladatok -------------------------------------------------------------
+TASK_STATUSES = ("open", "waiting", "done", "obsolete", "cancelled")
+
+
+def get_tasks(project_id):
+    """A projekt feladatai a felvétel sorrendjében. DbError, ha a tábla még nincs létrehozva."""
+    return _request("GET", "project_tasks", {"project_id": f"eq.{project_id}", "select": "*",
+                                             "order": "created_at.asc,id.asc"})
+
+
+def add_task(project_id, topic, title, note=""):
+    rows = _request("POST", "project_tasks", json={
+        "project_id": project_id, "topic": topic.strip(), "title": title.strip(), "note": (note or "").strip(),
+        "status": "open"})
+    if not rows:
+        raise DbError("a feladat mentését az adatbázis nem igazolta vissza.")
+    return rows[0]
+
+
+def update_task(task_id, **fields):
+    if "status" in fields and fields["status"] not in TASK_STATUSES:
+        raise DbError(f"ismeretlen állapot: {fields['status']}")
+    rows = _request("PATCH", "project_tasks", {"id": f"eq.{task_id}"}, json={**fields, "updated_at": now_iso()})
+    if not rows:
+        raise DbError(NOT_APPLIED)
+    return rows[0]
+
+
+def delete_task(task_id):
+    _request("DELETE", "project_tasks", {"id": f"eq.{task_id}"}, prefer="return=minimal")
+    if _request("GET", "project_tasks", {"id": f"eq.{task_id}", "select": "id"}):
         raise DbError(NOT_APPLIED)
 
 

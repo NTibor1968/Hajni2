@@ -73,7 +73,8 @@ hr {{ margin: .5rem 0 !important; }}
 [data-testid="stSidebar"] h3 {{ font-size: 1rem !important; padding: .2rem 0 .3rem !important; margin: 0 !important; line-height: 1.4 !important; }}
 [data-testid="stSidebar"] [data-testid="stHeading"] {{ margin: 0 !important; overflow: visible !important; }}
 /* az összefoglalók apró szerkesztés- és törlésgombja */
-[class*="st-key-sum_editbtn_"] button, [class*="st-key-sum_delbtn_"] button {{
+[class*="st-key-sum_editbtn_"] button, [class*="st-key-sum_delbtn_"] button,
+[class*="st-key-task_editbtn_"] button, [class*="st-key-task_delbtn_"] button {{
     min-height: 1.7rem !important; padding: 0 .45rem !important; }}
 
 /* keskeny, mindig látható fejlécsor */
@@ -94,19 +95,21 @@ hr {{ margin: .5rem 0 !important; }}
 /* (A :has() szabályok külön állnak: amelyik böngésző nem ismeri, az csak azt a blokkot hagyja ki.
    A dvh a táblagépek és telefonok ténylegesen látható ablakmagassága; ahol nincs, a vh érvényes.) */
 .st-key-chat_box {{ height: calc(100vh - {CHAT_OFFSET_PX}px) !important; height: calc(100dvh - {CHAT_OFFSET_PX}px) !important; min-height: 260px; }}
-.st-key-docs_box, .st-key-sums_box {{ height: calc(100vh - {PANEL_OFFSET_PX}px) !important; height: calc(100dvh - {PANEL_OFFSET_PX}px) !important; min-height: 260px; }}
+.st-key-docs_box, .st-key-sums_box, .st-key-tasks_box {{ height: calc(100vh - {PANEL_OFFSET_PX}px) !important; height: calc(100dvh - {PANEL_OFFSET_PX}px) !important; min-height: 260px; }}
 .st-key-search_box {{ height: calc(100vh - {SEARCH_OFFSET_PX}px) !important; height: calc(100dvh - {SEARCH_OFFSET_PX}px) !important; min-height: 260px; }}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-chat_box) {{
     height: calc(100vh - {CHAT_OFFSET_PX}px) !important; height: calc(100dvh - {CHAT_OFFSET_PX}px) !important; min-height: 260px; }}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-docs_box),
-div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-sums_box) {{
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-sums_box),
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-tasks_box) {{
     height: calc(100vh - {PANEL_OFFSET_PX}px) !important; height: calc(100dvh - {PANEL_OFFSET_PX}px) !important; min-height: 260px; }}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-search_box) {{
     height: calc(100vh - {SEARCH_OFFSET_PX}px) !important; height: calc(100dvh - {SEARCH_OFFSET_PX}px) !important; min-height: 260px; }}
 
 /* A fix magasságú dobozban a tartalom görgessen, ne zsugorodjon: enélkül a megadott magasságú elemek
    (pl. a szerkesztőmezők) összenyomódnak, amikor a tartalom nem fér ki. */
-.st-key-chat_box > *, .st-key-docs_box > *, .st-key-sums_box > *, .st-key-search_box > *,
+.st-key-chat_box > *, .st-key-docs_box > *, .st-key-sums_box > *, .st-key-search_box > *, .st-key-tasks_box > *,
+.st-key-tasks_box [data-testid="stElementContainer"],
 .st-key-chat_box [data-testid="stElementContainer"], .st-key-docs_box [data-testid="stElementContainer"],
 .st-key-sums_box [data-testid="stElementContainer"], .st-key-search_box [data-testid="stElementContainer"] {{
     flex-shrink: 0 !important; }}
@@ -237,6 +240,7 @@ def render_doc_preview(doc, text=None):
 # Ezeket a sorokat az alkalmazás fűzi Piri válasza alá (nem Piri írja).
 CREATED_MARK = "📎 **Elkészült:**"
 PROBLEM_MARK = "⚠️ **Figyelem:**"
+TASK_MARK = "🗒️ **Feladatok:**"
 
 
 def created_names(content):
@@ -250,7 +254,7 @@ def created_names(content):
 def strip_app_notes(content):
     """Az alkalmazás által hozzáfűzött sorok nélkül adjuk vissza a választ Pirinek, különben utánozni kezdi
     őket: „Elkészült”-et ír úgy, hogy valójában nem hívta meg a dokumentumkészítő eszközt."""
-    kept = [l for l in str(content).splitlines() if not l.startswith((CREATED_MARK, PROBLEM_MARK))]
+    kept = [l for l in str(content).splitlines() if not l.startswith((CREATED_MARK, PROBLEM_MARK, TASK_MARK))]
     return "\n".join(kept).strip() or "(A fájl elkészült.)"
 
 
@@ -341,7 +345,132 @@ def summaries_for_prompt(summaries):
     )
 
 
-def build_system(summaries):
+# --- FELADATOK: ÁLLAPOTOK, PIRI ESZKÖZEI ---------------------------------------
+# A pipa azt jelenti, hogy a magunk részét elvégeztük; pipa nélkül a feladat nyitott (nálunk a labda).
+TASK_STATUS_LABELS = {"open": "nyitott", "waiting": "választ várunk", "done": "kész",
+                      "obsolete": "elavult", "cancelled": "törölt"}
+TASK_ACTIVE = ("open", "waiting")           # ezek látszanak alapból
+TASK_CHECKED = ("waiting", "done", "obsolete", "cancelled")  # pipált feladat lehetséges állapotai
+NO_TOPIC = "Egyéb"
+
+TASK_TOOLS = [
+    {
+        "name": "add_task",
+        "description": "Új tennivaló felvétele a projekt Feladatok listájára. Csak akkor hívd meg, ha a "
+                       "felhasználó kifejezetten kéri a felvételt.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "A téma rövid neve (pl. Vízhálózat). Ha van már "
+                                                           "illő téma a listán, pontosan azt használd."},
+                "title": {"type": "string", "description": "A tennivaló egy mondatban (pl. Gépésznek megírni a specifikációt)."},
+                "note": {"type": "string", "description": "Rövid megjegyzés, ha van (nem kötelező)."},
+            },
+            "required": ["topic", "title"],
+        },
+    },
+    {
+        "name": "update_task",
+        "description": "Meglévő feladat állapotának, megjegyzésének, szövegének vagy témájának módosítása. "
+                       "Csak akkor hívd meg, ha a felhasználó kifejezetten kéri.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "A feladat azonosítója a listából (a # utáni szám)."},
+                "status": {"type": "string", "enum": list(TASK_STATUS_LABELS),
+                           "description": "open = nyitott (nálunk a labda), waiting = választ várunk, done = kész, "
+                                          "obsolete = elavult, cancelled = törölt (nem kell elvégezni)."},
+                "note": {"type": "string"},
+                "title": {"type": "string"},
+                "topic": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+]
+
+
+def task_status(task):
+    return task.get("status") if task.get("status") in TASK_STATUS_LABELS else "open"
+
+
+def task_topic(task):
+    return (task.get("topic") or "").strip() or NO_TOPIC
+
+
+def task_line(task):
+    note = f" (megjegyzés: {task['note']})" if task.get("note") else ""
+    return f"#{task['id']} [{TASK_STATUS_LABELS[task_status(task)]}] {task_topic(task)} » {task['title']}{note}"
+
+
+def match_topic(topic, tasks):
+    """Ha már van ilyen téma (kis- és nagybetűtől függetlenül), annak az írásmódját használjuk."""
+    topic = str(topic or "").strip()
+    for t in tasks:
+        if task_topic(t).lower() == topic.lower():
+            return task_topic(t)
+    return topic or NO_TOPIC
+
+
+def tasks_for_prompt(tasks):
+    if tasks is None:  # a feladatok táblája még nincs létrehozva: Piri nem kap róla sem leírást, sem eszközt
+        return ""
+    listing = "\n".join(task_line(t) for t in tasks[-200:]) or "(még nincs feladat)"
+    return (
+        "\n\nFELADATOK:\n"
+        "A projekthez feladatlista tartozik (Feladatok fül), két szinten: téma » tennivaló. Állapotok: nyitott "
+        "(nálunk a labda), választ várunk, kész, elavult, törölt (nem kell elvégezni; az okot a megjegyzés őrzi). "
+        "Feladatot felvenni (add_task) vagy módosítani (update_task) csak akkor szabad, ha a felhasználó "
+        "kifejezetten kéri. Ha a beszélgetésben teendő merül fel, magadtól ne vedd fel, csak ajánld fel egy "
+        "mondatban, a téma és a tennivaló megnevezésével. Soha ne állítsd, hogy egy feladatot felvettél vagy "
+        "módosítottál, ha az eszköz ezt nem igazolta vissza. Feladatot törölni nem tudsz; azt a felhasználó "
+        "teheti meg a Feladatok fülön. A jelenlegi lista:\n" + listing
+    )
+
+
+def make_task_handlers(project_id, tasks, events):
+    """Piri feladatkezelő eszközeinek végrehajtói. Az events listába kerül, ami ténylegesen megtörtént."""
+    by_id = {t["id"]: t for t in tasks}
+
+    def add(inp):
+        title = str(inp.get("title") or "").strip()
+        if not title:
+            raise ValueError("A tennivaló szövege hiányzik.")
+        topic = match_topic(inp.get("topic"), list(by_id.values()))
+        row = db.add_task(project_id, topic, title, str(inp.get("note") or ""))
+        by_id[row["id"]] = row
+        events.append(f"felvéve: {topic} » {title}")
+        return f"Felvéve a Feladatok listájára: {task_line(row)}"
+
+    def update(inp):
+        try:
+            task_id = int(inp.get("task_id"))
+        except (TypeError, ValueError):
+            raise ValueError("Hiányzik a feladat azonosítója (task_id).")
+        if task_id not in by_id:
+            raise ValueError("Ebben a projektben nincs ilyen azonosítójú feladat.")
+        fields = {}
+        if inp.get("status") is not None:
+            if inp["status"] not in TASK_STATUS_LABELS:
+                raise ValueError("Ismeretlen állapot.")
+            fields["status"] = inp["status"]
+        if isinstance(inp.get("note"), str):
+            fields["note"] = inp["note"].strip()
+        if isinstance(inp.get("title"), str) and inp["title"].strip():
+            fields["title"] = inp["title"].strip()
+        if isinstance(inp.get("topic"), str) and inp["topic"].strip():
+            fields["topic"] = match_topic(inp["topic"], list(by_id.values()))
+        if not fields:
+            raise ValueError("Nincs megadva, mit kell módosítani.")
+        row = db.update_task(task_id, **fields)
+        by_id[task_id] = row
+        events.append(f"módosítva: {task_topic(row)} » {row['title']} ({TASK_STATUS_LABELS[task_status(row)]})")
+        return f"Módosítva: {task_line(row)}"
+
+    return {"add_task": add, "update_task": update}
+
+
+def build_system(summaries, tasks=None):
     # SYSTEM PROMPT A GYÖNYÖRŰ MAGYAR JOGI NYELVÉRT
     return (
         "Te egy professzionális, rendkívül intelligens és precíz jogi és törvényelemző AI asszisztens vagy, "
@@ -377,6 +506,7 @@ def build_system(summaries):
         "MUNKAANYAGOK:\n"
         "A felhasználó a kérdéseihez képet vagy fájlt csatolhat. Ezek munkaanyagok: a beszélgetés részei, de "
         "nem kerülnek a projekt dokumentumtárába, és az előzmények törlésekor törlődnek."
+        + tasks_for_prompt(tasks)
         + summaries_for_prompt(summaries)
     )
 
@@ -611,7 +741,7 @@ def attachment_caption(attachments):
     return f"📎 {names} (munkaanyag, nem kerül a dokumentumtárba)"
 
 
-def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summaries):
+def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summaries, tasks=None):
     pid = project["id"]
     docs_by_id = {d["id"]: d for d in project_docs}
 
@@ -741,6 +871,11 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
 
         # Eszközök: a beépített webes kereső (az Anthropic szerverein fut) és a dokumentumkészítők (nálunk futnak)
         tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}] + ex.TOOLS
+        task_events = []
+        task_handlers = None
+        if tasks is not None:  # feladatkezelés csak akkor, ha a feladatok táblája létezik
+            tools = tools + TASK_TOOLS
+            task_handlers = make_task_handlers(pid, tasks, task_events)
         taken_names = {d["name"] for d in project_docs}
 
         def save_created_file(name, mime, data):
@@ -754,11 +889,14 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
         with st.chat_message("assistant"):
             with st.spinner("Piri elemzi a tartalmat, keres és gondolkodik… (hosszabb dokumentumnál ez több perc is lehet)"):
                 answer, sources, created_files, problems = chat_flow.run_conversation(
-                    claude_client, MODEL, build_system(summaries), api_messages, tools, save_created_file)
+                    claude_client, MODEL, build_system(summaries, tasks), api_messages, tools, save_created_file,
+                    handlers=task_handlers)
             answer = answer or "(Piri most nem adott szöveges választ.)"
             # A hibát az elmentett válaszba is beírjuk, mert az oldal rögtön újratöltődik
             if problems:
                 answer += f"\n\n{PROBLEM_MARK} " + " ".join(problems)
+            if task_events:
+                answer += f"\n\n{TASK_MARK} " + "; ".join(task_events) + " – a **Feladatok** fülön látod."
             if created_files:
                 answer += (f"\n\n{CREATED_MARK} " + ", ".join(f"`{n}`" for n in created_files)
                            + " – itt lent és a **Dokumentumok** fülön is letölthető.")
@@ -914,6 +1052,160 @@ def render_summaries_tab(project, readonly, summaries, messages):
                             st.rerun()
                         except db.DbError as e:
                             st.error(f"A mentés nem sikerült: {e}")
+
+
+# --- FELADATOK FÜL -----------------------------------------------------------
+def _task_apply(task_id, **fields):
+    try:
+        db.update_task(task_id, **fields)
+    except db.DbError as e:
+        st.session_state["tasks_flash"] = ("error", f"A módosítás nem sikerült: {e}")
+
+
+def _task_checked(task_id, key):
+    # pipa = a magunk részét elvégeztük (alapból „kész”); pipa nélkül a feladat nyitott
+    _task_apply(task_id, status="done" if st.session_state.get(key) else "open")
+
+
+def _task_status_changed(task_id, key):
+    value = st.session_state.get(key)
+    if value in TASK_STATUS_LABELS:
+        _task_apply(task_id, status=value)
+
+
+def _close_task_delete_dialog():
+    st.session_state.pop("task_delete_open", None)
+
+
+@dialog("Feladat végleges törlése", _close_task_delete_dialog)
+def task_delete_dialog(task):
+    st.write(f"Biztosan törlöd ezt a feladatot? **{task_topic(task)} » {task['title']}**")
+    st.warning("A törlés végleges, a feladat nyom nélkül eltűnik a listáról (ez a tévesen felvett tételekre való). "
+               "Ha csak nem kell elvégezni, és ezt később is látni szeretnéd, inkább állítsd „törölt” vagy "
+               "„elavult” állapotra, és írd a megjegyzésbe az okát.")
+    c1, c2 = st.columns(2)
+    if c1.button("🗑️ Igen, végleges törlés", type="primary", key="task_delete_yes", **STRETCH):
+        try:
+            db.delete_task(task["id"])
+        except db.DbError as e:
+            st.error(f"A törlés nem sikerült: {e}")
+            return
+        st.session_state["tasks_flash"] = ("success", "A feladat törölve.")
+        _close_task_delete_dialog()
+        st.rerun()
+    if c2.button("Mégse", key="task_delete_no", **STRETCH):
+        _close_task_delete_dialog()
+        st.rerun()
+
+
+def render_task_row(task, readonly, all_tasks):
+    tid = task["id"]
+    status = task_status(task)
+    nonce = st.session_state.get("task_edit_nonce", 0)
+    editing = not readonly and st.session_state.get("task_editing") == tid
+    c_chk, c_title, c_status, c_edit, c_del = st.columns([0.35, 6, 2.2, 0.5, 0.5], gap="small",
+                                                         vertical_alignment="center")
+    # a kulcsban benne van az állapot, így módosítás után a pipa és a lista a friss értéket mutatja
+    chk_key = f"task_chk_{tid}_{status}"
+    c_chk.checkbox("Elvégezve", value=status != "open", key=chk_key, label_visibility="collapsed",
+                   disabled=readonly, on_change=_task_checked, args=(tid, chk_key))
+    c_title.write(task["title"])
+    if task.get("note"):
+        c_title.caption(f"📝 {task['note']}")
+    if status == "open":
+        c_status.caption("nyitott – nálunk a labda")
+    else:
+        st_key = f"task_st_{tid}_{status}"
+        c_status.selectbox("Állapot", options=list(TASK_CHECKED), index=TASK_CHECKED.index(status),
+                           format_func=TASK_STATUS_LABELS.get, key=st_key, label_visibility="collapsed",
+                           disabled=readonly, on_change=_task_status_changed, args=(tid, st_key))
+    if readonly:
+        return
+    if c_edit.button("✏️", key=f"task_editbtn_{tid}",
+                     help="Szerkesztés bezárása (mentés nélkül)" if editing else "Szöveg, téma és megjegyzés szerkesztése"):
+        st.session_state["task_editing"] = None if editing else tid
+        st.session_state["task_edit_nonce"] = nonce + 1
+        st.rerun()
+    if c_del.button("🗑️", key=f"task_delbtn_{tid}", help="Feladat végleges törlése (tévesen felvett tételhez)"):
+        st.session_state["task_delete_open"] = tid
+        st.rerun()
+    if editing:
+        e1, e2 = st.columns([1, 2])
+        new_topic = e1.text_input("Téma", value=task_topic(task), key=f"task_e_topic_{tid}_{nonce}")
+        new_title = e2.text_input("Tennivaló", value=task["title"], key=f"task_e_title_{tid}_{nonce}")
+        new_note = st.text_input("Megjegyzés", value=task.get("note") or "", key=f"task_e_note_{tid}_{nonce}",
+                                 placeholder="pl. kire várunk, vagy miért nem kell elvégezni")
+        if st.button("💾 Mentés", key=f"task_e_save_{tid}", type="primary"):
+            if not new_title.strip():
+                st.error("A tennivaló szövege nem lehet üres.")
+            else:
+                others = [t for t in all_tasks if t["id"] != tid]
+                try:
+                    db.update_task(tid, topic=match_topic(new_topic, others), title=new_title.strip(),
+                                   note=new_note.strip())
+                except db.DbError as e:
+                    st.error(f"A mentés nem sikerült: {e}")
+                else:
+                    st.session_state["task_editing"] = None
+                    st.session_state["task_edit_nonce"] = nonce + 1
+                    st.rerun()
+
+
+def render_tasks_tab(project, readonly, tasks):
+    pid = project["id"]
+    with st.container(height=FALLBACK_HEIGHT_PX, border=False, key="tasks_box"):
+        if tasks is None:
+            st.warning("A Feladatok használatához egyszer frissíteni kell az adatbázist: futtasd le a `schema.sql` "
+                       "teljes tartalmát a Supabase **SQL Editor** felületén, majd töltsd újra ezt az oldalt. "
+                       "A szkript meglévő adatot nem töröl; az alkalmazás többi része addig is működik.")
+            try:
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql"), encoding="utf-8") as fh:
+                    with st.expander("A futtatandó szkript"):
+                        st.code(fh.read(), language="sql")
+            except OSError:
+                pass
+            return
+        st.caption("Tennivalók témák szerint. A pipa azt jelenti, hogy a magunk részét elvégeztük; mellette az "
+                   "állapot: választ várunk, kész, elavult vagy törölt. Piri kérésre vesz fel és módosít feladatot.")
+        show_flash("tasks_flash")
+        topics = list(dict.fromkeys(task_topic(t) for t in tasks))
+
+        if not readonly:
+            with st.expander("➕ Új feladat"):
+                with st.form(f"task_add_{pid}", clear_on_submit=True):
+                    f1, f2 = st.columns([1, 2])
+                    topic = f1.text_input("Téma", placeholder="pl. Vízhálózat")
+                    title = f2.text_input("Tennivaló", placeholder="pl. Gépésznek megírni a specifikációt")
+                    note = st.text_input("Megjegyzés (nem kötelező)")
+                    if st.form_submit_button("Felvétel"):
+                        if not title.strip():
+                            st.error("Írd be a tennivalót.")
+                        else:
+                            try:
+                                db.add_task(pid, match_topic(topic, tasks), title, note)
+                            except db.DbError as e:
+                                st.error(f"A felvétel nem sikerült: {e}")
+                            else:
+                                st.rerun()
+                if topics:
+                    st.caption("Meglévő témák: " + ", ".join(topics))
+
+        hidden = [t for t in tasks if task_status(t) not in TASK_ACTIVE]
+        show_all = bool(hidden) and st.toggle(f"Kész, elavult és törölt tételek is ({len(hidden)})",
+                                              key=f"tasks_all_{pid}")
+        visible = tasks if show_all else [t for t in tasks if task_status(t) in TASK_ACTIVE]
+        if not tasks:
+            st.info("Ebben a projektben még nincs feladat. Vegyél fel egyet fent, vagy kérd meg Pirit a beszélgetésben.")
+        elif not visible:
+            st.info("Nincs nyitott vagy válaszra váró feladat.")
+        for topic in topics:
+            rows = [t for t in visible if task_topic(t) == topic]
+            if not rows:
+                continue
+            st.divider()
+            st.markdown(f"**{topic}**")
+            for task in rows:
+                render_task_row(task, readonly, tasks)
 
 
 # --- KERESÉS -----------------------------------------------------------------
@@ -1175,6 +1467,10 @@ elif current_project:
     except db.DbError as e:
         st.error(f"A projekt adatai nem tölthetők be: {e}")
         st.stop()
+    try:
+        tasks = db.get_tasks(current_id)
+    except db.DbError:
+        tasks = None  # a feladatok táblája még nincs létrehozva; a Feladatok fül megmondja, mi a teendő
     atts_by_msg = {}
     for att in attachments:
         atts_by_msg.setdefault(att["message_id"], []).append(att)
@@ -1191,14 +1487,22 @@ elif current_project:
             sum_delete_dialog(doomed_summary)
         else:
             _close_sum_delete_dialog()
+    elif st.session_state.get("task_delete_open") is not None and tasks and not current_closed:
+        doomed_task = next((x for x in tasks if x["id"] == st.session_state["task_delete_open"]), None)
+        if doomed_task:
+            task_delete_dialog(doomed_task)
+        else:
+            _close_task_delete_dialog()
 
-    tab_chat, tab_docs, tab_sums = st.tabs(
-        ["💬 Beszélgetés", "📄 Dokumentumok", "📋 Összefoglalók"])  # állandó feliratok, különben fülváltás lenne
+    tab_chat, tab_docs, tab_sums, tab_tasks = st.tabs(
+        ["💬 Beszélgetés", "📄 Dokumentumok", "📋 Összefoglalók", "✅ Feladatok"])  # állandó feliratok, különben fülváltás lenne
     with tab_chat:
-        render_chat_tab(current_project, current_closed, project_docs, messages, atts_by_msg, summaries)
+        render_chat_tab(current_project, current_closed, project_docs, messages, atts_by_msg, summaries, tasks)
     with tab_docs:
         render_docs_tab(current_project, current_closed, project_docs)
     with tab_sums:
         render_summaries_tab(current_project, current_closed, summaries, messages)
+    with tab_tasks:
+        render_tasks_tab(current_project, current_closed, tasks)
 else:
     st.write("### 👈 Kezdéshez válassz vagy hozz létre egy projektet a bal oldali sávban!")

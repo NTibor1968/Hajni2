@@ -22,7 +22,7 @@ end $$;
 alter table public.project_documents add column if not exists content_text text;
 alter table public.project_documents add column if not exists search_text text;
 
--- 3. Új táblák: összefoglalók és a beszélgetésbe csatolt munkaanyagok.
+-- 3. Új táblák: összefoglalók, a beszélgetésbe csatolt munkaanyagok és a feladatok.
 --    A project_id és a message_id típusa automatikusan a meglévő táblákéhoz igazodik.
 do $$
 declare
@@ -61,28 +61,44 @@ begin
        content_b64 text not null,
        created_at timestamptz not null default now()
      )', pid_type, mid_type);
+
+  -- Feladatok: téma » tennivaló, állapottal és megjegyzéssel
+  -- (állapotok: open = nyitott, waiting = választ várunk, done = kész, obsolete = elavult, cancelled = törölt)
+  execute format(
+    'create table if not exists public.project_tasks (
+       id bigint generated always as identity primary key,
+       project_id %s not null,
+       topic text not null default '''',
+       title text not null,
+       status text not null default ''open'',
+       note text not null default '''',
+       created_at timestamptz not null default now(),
+       updated_at timestamptz
+     )', pid_type);
 end $$;
 
 create index if not exists project_summaries_project_idx on public.project_summaries (project_id, created_at);
 create index if not exists message_attachments_project_idx on public.message_attachments (project_id);
 create index if not exists message_attachments_message_idx on public.message_attachments (message_id);
+create index if not exists project_tasks_project_idx on public.project_tasks (project_id, created_at);
 
 -- 4. Jogosultságok: az alkalmazás kulcsa olvashassa és írhassa az öt táblát.
 --    (Az új funkciókhoz a régi tábláknál is kell módosítás és törlés: sorrend, lezárás,
 --    projekt törlése, előzmények törlése, dokumentumok feldolgozása a kereséshez.)
 alter table public.project_summaries enable row level security;
 alter table public.message_attachments enable row level security;
+alter table public.project_tasks enable row level security;
 
 grant select, insert, update, delete
    on public.projects, public.messages, public.project_documents,
-      public.project_summaries, public.message_attachments
+      public.project_summaries, public.message_attachments, public.project_tasks
    to anon, authenticated, service_role;
 
 do $$
 declare
   t text;
 begin
-  foreach t in array array['projects', 'messages', 'project_documents', 'project_summaries', 'message_attachments']
+  foreach t in array array['projects', 'messages', 'project_documents', 'project_summaries', 'message_attachments', 'project_tasks']
   loop
     execute format('drop policy if exists piri_app_access on public.%I', t);
     execute format(

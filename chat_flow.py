@@ -19,13 +19,19 @@ def _call_model(client, **kwargs):
         return stream.get_final_message()
 
 
-def _execute_tool(block, save_file, created, problems):
+def _execute_tool(block, save_file, created, problems, handlers=None):
     """Egy tool_use blokk végrehajtása; mindig tool_result blokkot ad vissza."""
     def result(text, error=False):
         r = {"type": "tool_result", "tool_use_id": block.id, "content": text}
         if error:
             r["is_error"] = True
         return r
+
+    if handlers and block.name in handlers:  # nem fájlt készítő eszköz (pl. feladatok): szöveges eredményt ad
+        try:
+            return result(str(handlers[block.name](block.input or {})))
+        except Exception as e:
+            return result(f"Hiba: {e}", error=True)
 
     try:
         name, mime, data = ex.run_tool(block.name, block.input)
@@ -46,7 +52,8 @@ def _execute_tool(block, save_file, created, problems):
         return result(f"Váratlan hiba a fájl készítésekor: {e}", error=True)
 
 
-def run_conversation(client, model, system, api_messages, tools, save_file, max_rounds=8, max_tokens=64000):
+def run_conversation(client, model, system, api_messages, tools, save_file, max_rounds=8, max_tokens=64000,
+                     handlers=None):
     """Visszaad: (válasz szövege, források {url: cím}, elkészült fájlnevek, problémák listája).
 
     A problémák a felhasználónak szóló, érthető mondatok arról, ha egy fájl nem készült el vagy nem lett
@@ -80,7 +87,7 @@ def run_conversation(client, model, system, api_messages, tools, save_file, max_
             continue
 
         if response.stop_reason == "tool_use":  # dokumentumkészítő eszköz: végrehajtjuk, és visszaadjuk az eredményt
-            results = [_execute_tool(b, save_file, created, problems)
+            results = [_execute_tool(b, save_file, created, problems, handlers)
                        for b in response.content if b.type == "tool_use"]
             if not results:
                 break
