@@ -13,6 +13,14 @@ import db
 import export_tools as ex
 import search_tools as stx
 
+# Frissítés után a futó alkalmazás néha a saját moduljaink régi, memóriában maradt változatát használja
+# (ilyenkor pl. „db.get_tasks” hiányzik). Ha ezt észleljük, újratöltjük őket, így nem kell kézzel újraindítani.
+if (not hasattr(db, "get_tasks") or not hasattr(db, "delete_summary")
+        or "handlers" not in inspect.signature(chat_flow.run_conversation).parameters):
+    import importlib
+    for _module in (stx, ex, db, chat_flow):
+        importlib.reload(_module)
+
 # Kényszerített oldal konfiguráció a legelső sorban
 st.set_page_config(page_title="Piri Asszisztens", layout="wide")
 
