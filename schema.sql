@@ -6,6 +6,17 @@
 alter table public.projects add column if not exists sort_order double precision;
 alter table public.projects add column if not exists last_opened_at timestamptz;
 
+-- 1/b. Projektek állapota: a lezáráshoz a "closed" értéket is engedni kell.
+--    A régi projects_status_check szabály ezt nem engedte (23514-es hiba lezáráskor).
+alter table public.projects drop constraint if exists projects_status_check;
+do $$
+begin
+  if not exists (select 1 from public.projects where status is null or status not in ('active', 'closed')) then
+    alter table public.projects
+      add constraint projects_status_check check (status in ('active', 'closed'));
+  end if;
+end $$;
+
 -- 2. Dokumentumok: a fájlból kinyert szöveg (content_text) és annak kereshető,
 --    kisbetűs, ékezet nélküli változata (search_text; amíg üres, a dokumentum nincs feldolgozva)
 alter table public.project_documents add column if not exists content_text text;
