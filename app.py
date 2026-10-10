@@ -84,11 +84,13 @@ html, body, .stApp, .stApp input, .stApp textarea, .stApp button, .stApp select,
     font-family: 'Fraunces', Georgia, serif !important; color: {BRAND_DARK}; }}
 
 /* logó az oldalsáv tetején, körülötte szabadon hagyott térrel */
-.piri-logo {{ text-align: center; padding: .1rem 0 .7rem; }}
+/* (A Streamlit a szövegelemek dobozát alul 1rem-mel felhúzza, mert bekezdést vár benne; a saját, bekezdés
+   nélküli elemeinknél ezt alsó margóval egyenlítjük ki, különben rájuk csúszik a következő elem.) */
+.piri-logo {{ text-align: center; padding: .1rem 0 .3rem; margin-bottom: 1rem; }}
 .piri-logo img {{ width: 8.5rem; max-width: 70%; height: auto; }}
 
 /* az oldalsáv saját címei (a beépített címsorokra rácsúszott az alattuk lévő elem) */
-.piri-side-title {{ font-weight: 600; font-size: 1rem; line-height: 1.4; margin: .1rem 0 0; color: {BRAND_DARK}; }}
+.piri-side-title {{ font-weight: 600; font-size: 1rem; line-height: 1.4; margin: .1rem 0 1rem; color: {BRAND_DARK}; }}
 .piri-side-title.big {{ font-size: 1.2rem; font-weight: 500; }}
 
 /* feladatok: a lezárt (kész, elavult, törölt) tételek halványan, áthúzva */
@@ -177,6 +179,19 @@ def logo_data_uri(color):
     return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
 
 
+def _avatar(name):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name)
+    return path if os.path.exists(path) else None
+
+
+# A beszélgetés szimbólumai az arculat színeiben: a felhasználó (NT) szürke, Piri (P) mályvaszürke
+AVATARS = {"user": _avatar("avatar_user.svg"), "assistant": _avatar("avatar_piri.svg")}
+
+
+def chat_message(role):
+    return st.chat_message(role, avatar=AVATARS.get(role))
+
+
 def side_title(text, big=False):
     st.markdown(f'<div class="piri-side-title{" big" if big else ""}">{html.escape(text)}</div>',
                 unsafe_allow_html=True)
@@ -252,8 +267,8 @@ def is_markdown_doc(doc):
 
 def doc_icon(doc):
     mime = doc["mime_type"]
-    return ("🖼️" if mime.startswith("image/") else "📝" if is_markdown_doc(doc) else "📊" if mime == ex.XLSX_MIME
-            else "📽️" if mime == ex.PPTX_MIME else "📄")
+    return (":material/image:" if mime.startswith("image/") else ":material/article:" if is_markdown_doc(doc) else ":material/table_chart:" if mime == ex.XLSX_MIME
+            else ":material/slideshow:" if mime == ex.PPTX_MIME else ":material/description:")
 
 
 def save_document_bytes(project_id, name, mime_type, data):
@@ -276,11 +291,11 @@ def render_downloads(doc, key_prefix=""):
     base_name = doc["name"].rsplit(".", 1)[0]
     is_md = is_markdown_doc(doc)
     cols = st.columns(3 if is_md else 1)
-    cols[0].download_button(f"⬇️ {doc['name']}", data=data, file_name=doc["name"],
+    cols[0].download_button(f":material/download: {doc['name']}", data=data, file_name=doc["name"],
                             mime=doc["mime_type"], key=f"{key_prefix}dlb_{doc['id']}")
     if is_md:
-        for col, (label, fmt, mime) in zip(cols[1:], (("⬇️ Word (.docx)", "docx", ex.DOCX_MIME),
-                                                      ("⬇️ PDF", "pdf", ex.PDF_MIME))):
+        for col, (label, fmt, mime) in zip(cols[1:], ((":material/download: Word (.docx)", "docx", ex.DOCX_MIME),
+                                                      (":material/download: PDF", "pdf", ex.PDF_MIME))):
             try:
                 col.download_button(label, data=export_markdown(doc["id"], fmt, base_name),
                                     file_name=f"{base_name}.{fmt}", mime=mime,
@@ -636,7 +651,7 @@ def delete_dialog(project):
     st.warning("A törlés végleges, és mindent visz: a beszélgetést, a csatolt munkaanyagokat, "
                "a dokumentumtár összes fájlját és az összefoglalókat.")
     c1, c2 = st.columns(2)
-    if c1.button("🗑️ Igen, végleges törlés", type="primary", key="delete_yes", **STRETCH):
+    if c1.button(":material/delete: Igen, végleges törlés", type="primary", key="delete_yes", **STRETCH):
         try:
             db.delete_project(project["id"])
         except db.DbError as e:
@@ -655,7 +670,7 @@ def _close_compact_dialog():
     st.session_state.pop("compact_open", None)
 
 
-@dialog("🧹 Összefoglalás és előzmények törlése", _close_compact_dialog, width="large")
+@dialog("Összefoglalás és előzmények törlése", _close_compact_dialog, width="large")
 def compact_dialog(project, messages, atts_by_msg, summaries, project_docs):
     pid = project["id"]
     message_ids = [m["id"] for m in messages if m.get("id") is not None]
@@ -694,7 +709,7 @@ def compact_dialog(project, messages, atts_by_msg, summaries, project_docs):
                                 placeholder="pl. írd bele a három leányvállalat pontos számait is")
 
     c1, c2, c3 = st.columns([2.2, 1.6, 1])
-    if c1.button("✅ Jóváhagyás és előzmények törlése", type="primary", key="cd_approve", **STRETCH):
+    if c1.button(":material/check: Jóváhagyás és előzmények törlése", type="primary", key="cd_approve", **STRETCH):
         if not content.strip():
             st.error("Az összefoglaló üres, így nem menthető.")
             return
@@ -714,7 +729,7 @@ def compact_dialog(project, messages, atts_by_msg, summaries, project_docs):
         st.session_state.pop("compact_draft", None)
         _close_compact_dialog()
         st.rerun()
-    if c2.button("🔄 Újraírás Pirivel", key="cd_rewrite", **STRETCH):
+    if c2.button(":material/refresh: Újraírás Pirivel", key="cd_rewrite", **STRETCH):
         with st.spinner("Piri újraírja az összefoglalót…"):
             try:
                 new_description, new_content = generate(
@@ -735,7 +750,7 @@ def compact_dialog(project, messages, atts_by_msg, summaries, project_docs):
 
 
 def compact_button(project, key):
-    if st.button("🧹 Összefoglalás és törlés", key=key,
+    if st.button(":material/summarize: Összefoglalás és törlés", key=key,
                  help="Piri összefoglalja az eddigi beszélgetést; jóváhagyásod után az üzenetek törlődnek, "
                       "és Piri az összefoglalóból dolgozik tovább."):
         st.session_state["compact_open"] = project["id"]
@@ -759,7 +774,7 @@ def trim_label(msg):
     return f"{fmt_dt(msg.get('created_at'))} – {text[:90]}{'…' if len(text) > 90 else ''}"
 
 
-@dialog("✂️ Előzmények törlése összefoglaló nélkül", _close_trim_dialog, width="large")
+@dialog("Előzmények törlése összefoglaló nélkül", _close_trim_dialog, width="large")
 def trim_dialog(project, messages, atts_by_msg):
     points = trim_points(messages)
     if not points:
@@ -777,7 +792,7 @@ def trim_dialog(project, messages, atts_by_msg):
         + (f"; megmarad az előtte lévő {kept} üzenet." if kept else "; a beszélgetésből semmi nem marad meg.")
         + " A törlés nem vonható vissza. A dokumentumtár és az összefoglalók nem változnak.")
     c1, c2 = st.columns(2)
-    if c1.button("🗑️ Igen, törlés", type="primary", key="trim_yes", **STRETCH):
+    if c1.button(":material/delete: Igen, törlés", type="primary", key="trim_yes", **STRETCH):
         try:
             db.delete_messages(project["id"], [m["id"] for m in doomed])
         except db.DbError as e:
@@ -792,7 +807,7 @@ def trim_dialog(project, messages, atts_by_msg):
 
 
 def trim_button(project, key):
-    if st.button("✂️ Törlés összefoglaló nélkül", key=key,
+    if st.button(":material/content_cut: Törlés összefoglaló nélkül", key=key,
                  help="Egy kiválasztott kérdésedtől a beszélgetés végéig minden törlődik (pl. vakvágány); "
                       "ami előtte volt, megmarad. Összefoglaló nem készül."):
         st.session_state["trim_open"] = project["id"]
@@ -808,7 +823,7 @@ def show_flash(key):
 
 def attachment_caption(attachments):
     names = ", ".join(a["name"] for a in attachments)
-    return f"📎 {names} (munkaanyag, nem kerül a dokumentumtárba)"
+    return f":material/attach_file: {names} (munkaanyag, nem kerül a dokumentumtárba)"
 
 
 def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summaries, tasks=None):
@@ -820,7 +835,7 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
     selected_doc_ids = []
     if project_docs and not readonly:
         doc_ids = [d["id"] for d in project_docs]
-        with col_docs.popover(f"📎 Dokumentumok ({len(project_docs)})",
+        with col_docs.popover(f":material/attach_file: Dokumentumok ({len(project_docs)})",
                               help="Mely projektdokumentumokat vegye figyelembe Piri a következő kérdésnél"):
             selected_doc_ids = st.multiselect(
                 "Ezeket a projektdokumentumokat veszi figyelembe Piri a következő kérdésnél:",
@@ -839,7 +854,7 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
             st.caption("Az előzményeket összefoglaló váltotta fel (lásd az Összefoglalók fület); Piri azokból dolgozik."
                        if summaries else "Ebben a projektben még nincs üzenet.")
         for i, msg in enumerate(messages):
-            with st.chat_message(msg["role"]):
+            with chat_message(msg["role"]):
                 st.write(msg["content"])
                 if msg["role"] == "user":
                     if atts_by_msg.get(msg.get("id")):
@@ -852,7 +867,7 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
                     doc = find_doc(project_docs, name, msg.get("created_at"))
                     if not doc:
                         st.caption(f"`{name}` nem található a dokumentumtárban.")
-                    elif i == len(messages) - 1 or st.checkbox(f"⬇️ {name} letöltése",
+                    elif i == len(messages) - 1 or st.checkbox(f":material/download: {name} letöltése",
                                                                key=f"chat_dl_{msg_key}_{doc['id']}"):
                         render_downloads(doc, key_prefix=f"chat_{msg_key}_")
 
@@ -865,7 +880,7 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
                 saved_doc = find_doc(project_docs, saved_answers[answer_key])
                 if saved_doc:
                     render_downloads(saved_doc, key_prefix="saved_")
-            elif st.button("💾 A legutóbbi válasz mentése dokumentumként", key=f"save_answer_{answer_key}",
+            elif st.button(":material/save: A legutóbbi válasz mentése dokumentumként", key=f"save_answer_{answer_key}",
                            help="Piri válasza a dokumentumtárba kerül, és Word, PDF vagy Markdown formátumban letölthető."):
                 body = strip_app_notes(last["content"])
                 heading = re.search(r"^#{1,3}\s+(.+)$", body, flags=re.MULTILINE)
@@ -905,7 +920,7 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
     question = question or "Kérlek, nézd meg a csatolt fájlt."
 
     with chat_box:
-        with st.chat_message("user"):
+        with chat_message("user"):
             st.write(question)
             if new_files:
                 st.caption(attachment_caption([{"name": n} for n, _, _ in new_files]))
@@ -956,7 +971,7 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
                 taken_names.add(final_name)
             return ok, (final_name if ok else detail)
 
-        with st.chat_message("assistant"):
+        with chat_message("assistant"):
             with st.spinner("Piri elemzi a tartalmat, keres és gondolkodik… (hosszabb dokumentumnál ez több perc is lehet)"):
                 answer, sources, created_files, problems = chat_flow.run_conversation(
                     claude_client, MODEL, build_system(summaries, tasks), api_messages, tools, save_created_file,
@@ -1000,7 +1015,7 @@ def render_docs_tab(project, readonly, project_docs):
                 accept_multiple_files=True,
                 key=f"uploader_{pid}_{nonce}",
             )
-            if uploaded_files and st.button("💾 Feltöltés a projekt dokumentumtárába", type="primary"):
+            if uploaded_files and st.button(":material/save: Feltöltés a projekt dokumentumtárába", type="primary"):
                 saved, failed = 0, []
                 for f in uploaded_files:
                     if f.size > MAX_FILE_MB * 1024 * 1024:
@@ -1030,7 +1045,7 @@ def render_docs_tab(project, readonly, project_docs):
             col_info.write(f"{doc_icon(doc)} **{doc['name']}** · {size_kb} KB · {fmt_dt(doc.get('created_at'))[:10]}")
             want_download = col_dl.checkbox("Letöltés", key=f"dl_{doc['id']}")
             want_preview = col_prev.checkbox("Előnézet", key=f"prev_{doc['id']}")
-            if not readonly and col_del.button("🗑️", key=f"del_{doc['id']}", help="Dokumentum törlése a projektből"):
+            if not readonly and col_del.button(":material/delete:", key=f"del_{doc['id']}", help="Dokumentum törlése a projektből"):
                 try:
                     db.delete_document(doc["id"])
                     st.rerun()
@@ -1056,7 +1071,7 @@ def sum_delete_dialog(summary):
     st.warning("A törlés végleges, nem vonható vissza. Amit ez az összefoglaló őrzött a törölt előzményekből, "
                "azt Piri ezután nem fogja tudni.")
     c1, c2 = st.columns(2)
-    if c1.button("🗑️ Igen, végleges törlés", type="primary", key="sum_delete_yes", **STRETCH):
+    if c1.button(":material/delete: Igen, végleges törlés", type="primary", key="sum_delete_yes", **STRETCH):
         try:
             db.delete_summary(summary["id"])
         except db.DbError as e:
@@ -1092,14 +1107,14 @@ def render_summaries_tab(project, readonly, summaries, messages):
             # a két kis gomb közvetlenül a dátum mellett áll (szerkesztett összefoglalónál hosszabb a felirat)
             col_title, col_edit, col_del, _ = st.columns([4.6 if edited else 2.1, 0.45, 0.45, 5], gap="small",
                                                          vertical_alignment="center")
-            col_title.markdown(f"**📋 {fmt_dt(s['created_at'])}**{edited}")
+            col_title.markdown(f"**{fmt_dt(s['created_at'])}**{edited}")
             if not readonly:
-                if col_edit.button("✏️", key=f"sum_editbtn_{s['id']}",
+                if col_edit.button(":material/edit:", key=f"sum_editbtn_{s['id']}",
                                    help="Szerkesztés bezárása (mentés nélkül)" if editing else "Szerkesztés"):
                     st.session_state["sum_editing"] = None if editing else s["id"]
                     st.session_state["sum_edit_nonce"] = edit_nonce + 1  # a mezők a tárolt szöveggel induljanak
                     st.rerun()
-                if col_del.button("🗑️", key=f"sum_delbtn_{s['id']}", help="Összefoglaló törlése"):
+                if col_del.button(":material/delete:", key=f"sum_delbtn_{s['id']}", help="Összefoglaló törlése"):
                     st.session_state["sum_delete_open"] = s["id"]
                     st.rerun()
             st.write(s.get("description") or "(nincs leírás)")
@@ -1110,7 +1125,7 @@ def render_summaries_tab(project, readonly, summaries, messages):
                                                key=f"sum_desc_{s['id']}_{edit_nonce}")
                 new_content = st.text_area("Összefoglaló (Markdown)", value=s["content"], height=320,
                                            key=f"sum_content_{s['id']}_{edit_nonce}")
-                if st.button("💾 Módosítás mentése", key=f"sum_save_{s['id']}", type="primary"):
+                if st.button(":material/save: Módosítás mentése", key=f"sum_save_{s['id']}", type="primary"):
                     if not new_content.strip():
                         st.error("Az összefoglaló nem lehet üres.")
                     else:
@@ -1154,7 +1169,7 @@ def task_delete_dialog(task):
                "Ha csak nem kell elvégezni, és ezt később is látni szeretnéd, inkább állítsd „törölt” vagy "
                "„elavult” állapotra, és írd a megjegyzésbe az okát.")
     c1, c2 = st.columns(2)
-    if c1.button("🗑️ Igen, végleges törlés", type="primary", key="task_delete_yes", **STRETCH):
+    if c1.button(":material/delete: Igen, végleges törlés", type="primary", key="task_delete_yes", **STRETCH):
         try:
             db.delete_task(task["id"])
         except db.DbError as e:
@@ -1182,7 +1197,7 @@ def render_task_row(task, readonly, all_tasks):
     title_class = "piri-task" if status in TASK_ACTIVE else "piri-task-done"
     c_title.markdown(f'<span class="{title_class}">{html.escape(task["title"])}</span>', unsafe_allow_html=True)
     if task.get("note"):
-        c_title.caption(f"📝 {task['note']}")
+        c_title.caption(f":material/sticky_note_2: {task['note']}")
     if status == "open":
         c_status.caption("nálunk a labda")
     else:
@@ -1192,12 +1207,12 @@ def render_task_row(task, readonly, all_tasks):
                            disabled=readonly, on_change=_task_status_changed, args=(tid, st_key))
     if readonly:
         return
-    if c_edit.button("✏️", key=f"task_editbtn_{tid}",
+    if c_edit.button(":material/edit:", key=f"task_editbtn_{tid}",
                      help="Szerkesztés bezárása (mentés nélkül)" if editing else "Szöveg, téma és megjegyzés szerkesztése"):
         st.session_state["task_editing"] = None if editing else tid
         st.session_state["task_edit_nonce"] = nonce + 1
         st.rerun()
-    if c_del.button("🗑️", key=f"task_delbtn_{tid}", help="Feladat végleges törlése (tévesen felvett tételhez)"):
+    if c_del.button(":material/delete:", key=f"task_delbtn_{tid}", help="Feladat végleges törlése (tévesen felvett tételhez)"):
         st.session_state["task_delete_open"] = tid
         st.rerun()
     if editing:
@@ -1207,7 +1222,7 @@ def render_task_row(task, readonly, all_tasks):
         new_title = e2.text_input("Tennivaló", value=task["title"], key=f"task_e_title_{tid}_{nonce}")
         new_note = st.text_input("Megjegyzés", value=task.get("note") or "", key=f"task_e_note_{tid}_{nonce}",
                                  placeholder="pl. kire várunk, vagy miért nem kell elvégezni")
-        if st.button("💾 Mentés", key=f"task_e_save_{tid}", type="primary"):
+        if st.button(":material/save: Mentés", key=f"task_e_save_{tid}", type="primary"):
             if not new_title.strip():
                 st.error("A tennivaló szövege nem lehet üres.")
             else:
@@ -1243,7 +1258,7 @@ def render_tasks_tab(project, readonly, tasks):
         topics = list(dict.fromkeys(task_topic(t) for t in tasks))
 
         if not readonly:
-            with st.expander("➕ Új feladat"):
+            with st.expander(":material/add: Új feladat"):
                 with st.form(f"task_add_{pid}", clear_on_submit=True):
                     f1, f2 = st.columns([1, 2])
                     topic = topic_input(f1, "Téma", topics)
@@ -1327,15 +1342,15 @@ def render_search(active, closed):
                 continue
             st.divider()
             col_name, col_go = st.columns([6, 2])
-            col_name.markdown(f"**📁 {p['name']}**" + ("" if p.get("status") == "active" else " (lezárt)"))
-            if col_go.button("➡️ Ugrás a projektre", key=f"goto_{p['id']}", **STRETCH):
+            col_name.markdown(f"**:material/folder: {p['name']}**" + ("" if p.get("status") == "active" else " (lezárt)"))
+            if col_go.button(":material/arrow_forward: Ugrás a projektre", key=f"goto_{p['id']}", **STRETCH):
                 open_project(p["id"])
                 st.rerun()
 
             for s in p_sums:
                 snips = stx.snippets(s["content"], terms)
                 st.markdown(
-                    '<div class="piri-hit"><span class="title">📋 Összefoglaló</span>'
+                    '<div class="piri-hit"><span class="title">Összefoglaló</span>'
                     f'<span class="meta">{fmt_dt(s["created_at"])}</span>'
                     f'<div class="snip">{stx.highlight(s.get("description") or "", terms)}</div>'
                     + "".join(f'<div class="snip">{sn}</div>' for sn in snips) + "</div>",
@@ -1349,7 +1364,7 @@ def render_search(active, closed):
                 text = d.get("content_text") or ""
                 snips = stx.snippets(text, terms)
                 st.markdown(
-                    f'<div class="piri-hit"><span class="title">{doc_icon(d)} {stx.highlight(d["name"], terms)}</span>'
+                    f'<div class="piri-hit"><span class="title">{stx.highlight(d["name"], terms)}</span>'
                     f'<span class="meta">{fmt_dt(d.get("created_at"))[:10]}</span>'
                     + "".join(f'<div class="snip">{sn}</div>' for sn in snips) + "</div>",
                     unsafe_allow_html=True)
@@ -1428,7 +1443,7 @@ with st.sidebar:
     _logo = logo_data_uri(BRAND)
     if _logo:
         st.markdown(f'<div class="piri-logo"><img src="{_logo}" alt="NF Office"></div>', unsafe_allow_html=True)
-    st.text_input("🔎 Keresés", key="search_q", on_change=_search_changed,
+    st.text_input(":material/search: Keresés", key="search_q", on_change=_search_changed,
                   placeholder="keresés dokumentumokban és összefoglalókban",
                   help="Az aktív projektek dokumentumaiban és összefoglalóiban keres. Enterrel indul.")
     st.checkbox("Lezárt projektekben is", key="search_closed", on_change=_search_changed)
@@ -1454,7 +1469,7 @@ with st.sidebar:
 
     with st.form("project_form", clear_on_submit=True):
         new_project_name = st.text_input("Új téma / projekt neve:")
-        submit_button = st.form_submit_button("➕ Projekt létrehozása", **STRETCH)
+        submit_button = st.form_submit_button(":material/add: Projekt létrehozása", **STRETCH)
         if submit_button and new_project_name.strip():
             try:
                 created = db.create_project(new_project_name, top_sort_order(all_projects))
@@ -1485,7 +1500,7 @@ with st.sidebar:
                                    disabled=index == len(active_projects) - 1, **STRETCH):
                     move_project(active_projects, current_id, +1)
                     st.rerun()
-                if col_close.button("🔒 Lezárás", key="proj_close", **STRETCH,
+                if col_close.button(":material/lock: Lezárás", key="proj_close", **STRETCH,
                                     help="A projekt a lezártak közé kerül: megmarad és olvasható, de nem lehet benne kérdezni."):
                     db.update_project(current_id, status="closed")
                     st.rerun()
@@ -1504,13 +1519,13 @@ with st.sidebar:
             if current_closed:
                 st.caption("A kiválasztott lezárt projekt:")
                 col_reopen, col_delete = st.columns(2)
-                if col_reopen.button("🔓 Újranyitás", key="proj_reopen", **STRETCH):
+                if col_reopen.button(":material/lock_open: Újranyitás", key="proj_reopen", **STRETCH):
                     try:
                         db.update_project(current_id, status="active", sort_order=top_sort_order(all_projects))
                         st.rerun()
                     except db.DbError as e:
                         st.error(f"Az újranyitás nem sikerült: {e}")
-                if col_delete.button("🗑️ Törlés", key="proj_delete", **STRETCH):
+                if col_delete.button(":material/delete: Törlés", key="proj_delete", **STRETCH):
                     st.session_state["delete_open"] = current_id
                     st.rerun()
 
@@ -1574,7 +1589,8 @@ elif current_project:
             _close_task_delete_dialog()
 
     tab_chat, tab_docs, tab_sums, tab_tasks = st.tabs(
-        ["💬 Beszélgetés", "📄 Dokumentumok", "📋 Összefoglalók", "✅ Feladatok"])  # állandó feliratok, különben fülváltás lenne
+        [":material/chat: Beszélgetés", ":material/description: Dokumentumok", ":material/notes: Összefoglalók",
+         ":material/checklist: Feladatok"])  # állandó feliratok, különben fülváltás lenne
     with tab_chat:
         render_chat_tab(current_project, current_closed, project_docs, messages, atts_by_msg, summaries, tasks)
     with tab_docs:
@@ -1584,4 +1600,4 @@ elif current_project:
     with tab_tasks:
         render_tasks_tab(current_project, current_closed, tasks)
 else:
-    st.write("### 👈 Kezdéshez válassz vagy hozz létre egy projektet a bal oldali sávban!")
+    st.write("### Kezdéshez válassz vagy hozz létre egy projektet a bal oldali sávban!")
