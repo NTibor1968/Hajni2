@@ -112,3 +112,62 @@ def run_conversation(client, model, system, api_messages, tools, save_file, max_
             problems.append("Piri többszöri próbálkozásra sem tudta befejezni a feladatot. Próbáld meg újra, egyszerűbb kéréssel.")
 
     return "".join(parts).strip(), sources, created, list(dict.fromkeys(problems))
+
+
+# ---------------------------------------------------------------------------
+# Összefoglaló készítése az előzmények törlése előtt
+# ---------------------------------------------------------------------------
+SUMMARY_SEPARATOR = "====="
+
+SUMMARY_INSTRUCTION = (
+    "[Az alkalmazás kérése] Készíts összefoglalót a fenti beszélgetésről. A beszélgetés üzenetei és a "
+    "hozzájuk csatolt munkaanyagok (képek, fájlok) ezután véglegesen törlődnek, és a jövőben kizárólag "
+    "az összefoglalókból fogsz dolgozni. Ezért rögzíts minden olyan részletet, amire később szükség lehet; "
+    "ami kimarad, az elvész. Ne általánosságokat írj, hanem konkrétumokat: neveket, összegeket, dátumokat, "
+    "jogszabályhelyeket. Ne találj ki semmit, ami a beszélgetésben nem szerepelt.\n\n"
+    "A válaszod pontosan ebben a formában legyen, más szöveg nélkül:\n"
+    "LEÍRÁS: <2–3 mondat arról, miről szólt ez a beszélgetésszakasz és mi lett az eredménye>\n"
+    f"{SUMMARY_SEPARATOR}\n"
+    "<az összefoglaló Markdownban, az alábbi szakaszokkal; az üres szakaszt hagyd ki>\n"
+    "## Tények és számok\n## Döntések és megállapítások\n## Kijavított tévedések\n"
+    "## Nyitott kérdések és teendők\n## Elkészült fájlok\n## Csatolt munkaanyagok lényege\n\n"
+    "A „Kijavított tévedések” szakaszba azt írd, amit a beszélgetés során rosszul mondtál és később "
+    "helyesbítettél (a helyes változattal), hogy többé ne ismételd meg. A korábbi összefoglalók tartalmát "
+    "ne ismételd meg, csak az azóta történteket foglald össze."
+)
+
+
+def parse_summary(text):
+    """A modell válaszából (leírás, összefoglaló). Ha a formátum nem stimmel, a teljes szöveg az összefoglaló."""
+    text = str(text or "").strip()
+    head, sep, body = text.partition(SUMMARY_SEPARATOR)
+    if sep and body.strip():
+        description = head.strip()
+        for prefix in ("LEÍRÁS:", "Leírás:", "**LEÍRÁS:**", "**Leírás:**"):
+            if description.startswith(prefix):
+                description = description[len(prefix):].strip()
+        return " ".join(description.split()), body.strip().lstrip("=").strip()
+    plain = " ".join(text.replace("#", " ").replace("*", " ").split())
+    return plain[:300] + ("…" if len(plain) > 300 else ""), text
+
+
+def summarize(client, model, system, api_messages, doc_names=(), fix_request="", previous_draft="", max_tokens=16000):
+    """Összefoglaló a beszélgetésről. Visszaad: (rövid leírás, összefoglaló Markdownban).
+    A fix_request a felhasználó javítási kérése az előző tervezethez (previous_draft)."""
+    instruction = SUMMARY_INSTRUCTION
+    if doc_names:
+        instruction += ("\n\nA projekt dokumentumtárában lévő fájlok (ezek megmaradnak, a tartalmukat nem kell "
+                        "leírnod, csak hivatkozz rájuk név szerint, ahol kell): " + ", ".join(doc_names))
+    if previous_draft and fix_request:
+        instruction += (f"\n\nAz előző tervezeted ez volt:\n<tervezet>\n{previous_draft}\n</tervezet>\n\n"
+                        f"A felhasználó ezt kéri rajta javítani: {fix_request}\n"
+                        "Írd meg újra a teljes összefoglalót a javítással, ugyanabban a formában.")
+    messages = list(api_messages) + [{"role": "user", "content": instruction}]
+    response = _call_model(client, model=model, max_tokens=max_tokens, system=system, messages=messages)
+    text = "".join(b.text for b in response.content if b.type == "text")
+    if not text.strip():
+        raise RuntimeError("Piri nem adott vissza összefoglalót.")
+    description, content = parse_summary(text)
+    if response.stop_reason == "max_tokens":
+        content += "\n\n*(Az összefoglaló elérte a hosszkorlátot, a vége hiányozhat. Egészítsd ki, mielőtt jóváhagyod.)*"
+    return description, content

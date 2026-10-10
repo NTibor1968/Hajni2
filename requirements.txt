@@ -1,4 +1,4 @@
-streamlit
+streamlit>=1.50
 supabase
 anthropic
 pydantic
@@ -7,3 +7,4 @@ python-pptx
 python-docx
 reportlab
 markdown-it-py
+pypdf

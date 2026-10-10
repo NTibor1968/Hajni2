@@ -1,123 +1,117 @@
-import streamlit as st
-import requests
 import base64
+import html
+import inspect
+import os
 import re
 from datetime import date, datetime
+
+import streamlit as st
 from anthropic import Anthropic
 
 import chat_flow
+import db
 import export_tools as ex
+import search_tools as stx
 
 # Kényszerített oldal konfiguráció a legelső sorban
 st.set_page_config(page_title="Piri Asszisztens", layout="wide")
+
+# --- BEÁLLÍTÁSOK -----------------------------------------------------------
+MODEL = "claude-haiku-5-5"  # A Claude Haiku 3.5 2026.02.19-én kivezetésre került
+
+# A beszélgetés és a többi fül görgethető dobozának magassága. A doboz a böngészőablak magasságához
+# igazodik: ablakmagasság mínusz az alábbi képpontérték (fejléc, fülek, beviteli mező helye).
+# Ha a doboz alatt üres sáv marad, csökkentsd a számot; ha az oldal görgethetővé válik, növeld.
+CHAT_OFFSET_PX = 350    # Beszélgetés fül
+PANEL_OFFSET_PX = 230   # Dokumentumok és Összefoglalók fül
+SEARCH_OFFSET_PX = 175  # keresési találatok (itt nincsenek fülek)
+FALLBACK_HEIGHT_PX = 520  # régebbi Streamlit esetén ez a fix magasság érvényes
+
+MAX_FILE_MB = 10   # a tartalom Base64-ként az adatbázisban tárolódik, ezért korlátozzuk a méretet
+MAX_IMAGE_MB = 5   # ennél nagyobb képet a modell nem fogad el
+ATTACH_TYPES = ["png", "jpg", "jpeg", "gif", "webp", "pdf", "txt", "md", "csv", "docx", "xlsx", "pptx"]
+EXT_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp",
+    "pdf": ex.PDF_MIME, "txt": "text/plain", "md": ex.MD_MIME, "csv": "text/csv",
+    "docx": ex.DOCX_MIME, "xlsx": ex.XLSX_MIME, "pptx": ex.PPTX_MIME,
+}
+
+# A gombok teljes szélességét az újabb Streamlit width="stretch"-ként, a régebbi use_container_width-ként kéri
+STRETCH = ({"width": "stretch"} if "width" in inspect.signature(st.button).parameters
+           else {"use_container_width": True})
 
 # --- KULCSOK BIZTONSÁGOS BETÖLTÉSE ---
 try:
     SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().strip("'").strip('"')
     SUPABASE_KEY = str(st.secrets["SUPABASE_KEY"]).strip().strip("'").strip('"')
     ANTHROPIC_API_KEY = str(st.secrets["ANTHROPIC_API_KEY"]).strip().strip("'").strip('"')
-except Exception as e:
+except Exception:
     st.error("Hiba! Hiányzik a Secrets konfiguráció a Streamlit felületén.")
     st.stop()
 
-# --- ATOMBIZTOS UK-TISZTÍTÁS ÉS INICIALIZÁLÁS ---
-# A legfrissebb Secrets-ből beolvasott tiszta kulccsal indítjuk el a klienst
-clean_key = str(ANTHROPIC_API_KEY).strip().replace("'", "").replace('"', '')
-claude_client = Anthropic(api_key=clean_key)
+claude_client = Anthropic(api_key=ANTHROPIC_API_KEY.replace("'", "").replace('"', ""))
+db.init(SUPABASE_URL, SUPABASE_KEY)
 
-# Supabase hálózati fejléc
-headers = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=representation"
-}
+# --- MEGJELENÉS ------------------------------------------------------------
+CSS = f"""
+<style>
+/* kevesebb üres hely az oldal tetején és alján, hogy a beszélgetés kitöltse a képernyőt */
+.block-container, [data-testid="stMainBlockContainer"] {{ padding-top: 3.75rem !important; padding-bottom: 1rem !important; }}
 
-st.title("🤖 Piri AI Munkaállomás")
+/* keskeny, mindig látható fejlécsor */
+.piri-header {{ font-size: 1.15rem; font-weight: 600; line-height: 2.5rem; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }}
+.piri-header .sep {{ margin: 0 .6rem; opacity: .35; font-weight: 400; }}
+.piri-header .badge {{ margin-left: .5rem; font-size: .85rem; font-weight: 400; opacity: .7; }}
 
-# --- ADATBÁZIS MŰVELETEK ---
-def get_projects(status="active"):
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/projects?status=eq.{status}&order=created_at.desc"
-        res = requests.get(url, headers=headers)
-        return res.json() if res.status_code == 200 else []
-    except Exception:
-        return []
+/* kisebb címsorok Piri válaszaiban és az előnézetekben (a törzsszöveg változatlan) */
+[data-testid="stMarkdownContainer"] h1 {{ font-size: 1.3rem !important; font-weight: 700 !important; padding: .55rem 0 .2rem !important; }}
+[data-testid="stMarkdownContainer"] h2 {{ font-size: 1.2rem !important; font-weight: 700 !important; padding: .5rem 0 .2rem !important; }}
+[data-testid="stMarkdownContainer"] h3 {{ font-size: 1.1rem !important; font-weight: 700 !important; padding: .45rem 0 .15rem !important; }}
+[data-testid="stMarkdownContainer"] h4,
+[data-testid="stMarkdownContainer"] h5,
+[data-testid="stMarkdownContainer"] h6 {{ font-size: 1rem !important; font-weight: 700 !important; padding: .4rem 0 .1rem !important; }}
 
-def create_project(name):
-    if name.strip():
-        url = f"{SUPABASE_URL}/rest/v1/projects"
-        requests.post(url, headers=headers, json={"name": name.strip(), "status": "active"})
-        st.rerun()
+/* a görgethető dobozok a böngészőablak magasságához igazodnak */
+.st-key-chat_box,
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-chat_box) {{
+    height: calc(100vh - {CHAT_OFFSET_PX}px) !important; min-height: 260px; }}
+.st-key-docs_box, .st-key-sums_box,
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-docs_box),
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-sums_box) {{
+    height: calc(100vh - {PANEL_OFFSET_PX}px) !important; min-height: 260px; }}
+.st-key-search_box,
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-search_box) {{
+    height: calc(100vh - {SEARCH_OFFSET_PX}px) !important; min-height: 260px; }}
 
-def get_messages(project_id):
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/messages?project_id=eq.{project_id}&order=created_at.asc"
-        res = requests.get(url, headers=headers)
-        return res.json() if res.status_code == 200 else []
-    except Exception:
-        return []
+/* keresési találatok */
+.piri-hit {{ margin: .1rem 0 .2rem 0; }}
+.piri-hit .title {{ font-weight: 600; }}
+.piri-hit .meta {{ opacity: .6; font-size: .85rem; margin-left: .4rem; }}
+.piri-hit .snip {{ font-size: .92rem; opacity: .9; margin-top: .15rem; }}
+.piri-hit mark, .piri-header mark {{ background: #ffe58a; color: inherit; padding: 0 .12em; border-radius: 3px; }}
+</style>
+"""
 
-def save_message(project_id, role, content):
-    url = f"{SUPABASE_URL}/rest/v1/messages"
-    requests.post(url, headers=headers, json={"project_id": project_id, "role": role, "content": content})
 
-# --- DOKUMENTUMTÁR MŰVELETEK (projektenként) ---
-MAX_FILE_MB = 10  # a tartalom Base64-ként az adatbázisban tárolódik, ezért korlátozzuk a méretet
+def inject_css():
+    # st.html a csak stílust tartalmazó blokkot hely foglalása nélkül illeszti be
+    if hasattr(st, "html"):
+        st.html(CSS)
+    else:
+        st.markdown(CSS, unsafe_allow_html=True)
 
-def get_documents(project_id):
-    """Az adott projekt dokumentumainak listája (tartalom nélkül)."""
-    try:
-        url = (f"{SUPABASE_URL}/rest/v1/project_documents?project_id=eq.{project_id}"
-               "&select=id,name,mime_type,size_bytes,created_at&order=created_at.desc")
-        res = requests.get(url, headers=headers)
-        if res.status_code == 200:
-            return res.json()
-        st.warning(f"A dokumentumlista nem tölthető be ({res.status_code}): {res.text[:200]}")
-    except Exception as e:
-        st.warning(f"A dokumentumlista nem tölthető be: {e}")
-    return []
 
-def save_document_bytes(project_id, name, mime_type, data):
-    payload = {
-        "project_id": project_id,
-        "name": name,
-        "mime_type": mime_type,
-        "size_bytes": len(data),
-        "content_b64": base64.b64encode(data).decode("utf-8"),
-    }
-    try:
-        # return=minimal: ne küldje vissza a teljes (nagy) sort
-        res = requests.post(f"{SUPABASE_URL}/rest/v1/project_documents",
-                            headers={**headers, "Prefer": "return=minimal"}, json=payload)
-        if res.status_code in (200, 201, 204):
-            return True, ""
-        if "42501" in res.text or "row-level security" in res.text:
-            return False, ("a Supabase jogosultsági szabálya (RLS) elutasította a mentést: a project_documents "
-                           "táblához hiányzik az írást engedélyező policy.")
-        return False, f"{res.status_code}: {res.text[:300]}"
-    except Exception as e:
-        return False, str(e)
-
-def save_document(project_id, uploaded_file):
-    return save_document_bytes(project_id, uploaded_file.name, uploaded_file.type, uploaded_file.getvalue())
-
-@st.cache_data(show_spinner=False, max_entries=20)
+# --- GYORSÍTÓTÁRAZOTT BETÖLTÉSEK (a tárolt fájlok nem módosulnak) ---
+@st.cache_data(show_spinner=False, max_entries=40)
 def get_document_content(doc_id):
-    """Egy dokumentum Base64 tartalma (a dokumentumok nem módosulnak, ezért gyorsítótárazható)."""
-    res = requests.get(f"{SUPABASE_URL}/rest/v1/project_documents?id=eq.{doc_id}&select=content_b64", headers=headers)
-    rows = res.json() if res.status_code == 200 else []
-    if not rows:
-        raise RuntimeError("A dokumentum nem található.")
-    return rows[0]["content_b64"]
+    return db.get_document_content(doc_id)
 
-def delete_document(doc_id):
-    try:
-        res = requests.delete(f"{SUPABASE_URL}/rest/v1/project_documents?id=eq.{doc_id}",
-                              headers={**headers, "Prefer": "return=minimal"})
-        return res.status_code in (200, 204)
-    except Exception:
-        return False
+
+@st.cache_data(show_spinner=False, max_entries=60)
+def get_attachment_content(attachment_id):
+    return db.get_attachment_content(attachment_id)
+
 
 @st.cache_data(show_spinner=False, max_entries=20)
 def export_markdown(doc_id, fmt, title):
@@ -125,12 +119,55 @@ def export_markdown(doc_id, fmt, title):
     text = base64.b64decode(get_document_content(doc_id)).decode("utf-8", errors="replace")
     return ex.markdown_to_docx(text, title) if fmt == "docx" else ex.markdown_to_pdf(text, title)
 
+
+# --- ÁLTALÁNOS SEGÉDFÜGGVÉNYEK ----------------------------------------------
+def parse_ts(value):
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def fmt_dt(value):
+    """Adatbázis-időbélyeg magyar idő szerint, pl. 2026.10.10 18:40."""
+    ts = parse_ts(value)
+    if ts is None:
+        return str(value or "")[:16].replace("T", " ")
+    try:
+        from zoneinfo import ZoneInfo
+        ts = ts.astimezone(ZoneInfo("Europe/Budapest"))
+    except Exception:
+        pass
+    return ts.strftime("%Y.%m.%d %H:%M")
+
+
+def guess_mime(name, given=""):
+    ext = str(name).rsplit(".", 1)[-1].lower() if "." in str(name) else ""
+    return EXT_MIME.get(ext) or given or "application/octet-stream"
+
+
 def is_markdown_doc(doc):
     return doc["mime_type"] == ex.MD_MIME or doc["name"].lower().endswith(".md")
 
+
+def doc_icon(doc):
+    mime = doc["mime_type"]
+    return ("🖼️" if mime.startswith("image/") else "📝" if is_markdown_doc(doc) else "📊" if mime == ex.XLSX_MIME
+            else "📽️" if mime == ex.PPTX_MIME else "📄")
+
+
+def save_document_bytes(project_id, name, mime_type, data):
+    """Mentés a dokumentumtárba a kereséshez kinyert szöveggel együtt. Visszaad: (sikerült, hiba oka)."""
+    try:
+        db.save_document(project_id, name, mime_type, data, ex.extract_text(name, mime_type, data))
+        return True, ""
+    except db.DbError as e:
+        return False, str(e)
+
+
 def render_downloads(doc, key_prefix=""):
     """Letöltőgombok egy dokumentumhoz (a tartalom csak itt, igény szerint töltődik be).
-    A key_prefix azért kell, mert ugyanaz a dokumentum a chatben és a Dokumentumok fülön is megjelenhet."""
+    A key_prefix azért kell, mert ugyanaz a dokumentum több helyen is megjelenhet."""
     try:
         data = base64.b64decode(get_document_content(doc["id"]))
     except Exception:
@@ -151,10 +188,29 @@ def render_downloads(doc, key_prefix=""):
             except Exception as e:
                 col.warning(f"A(z) {fmt.upper()} nem készíthető el: {e}")
 
+
+def render_doc_preview(doc, text=None):
+    """Dokumentum előnézete: kép, Markdown, vagy a kinyert szöveg eleje."""
+    try:
+        if doc["mime_type"].startswith("image/"):
+            st.image(base64.b64decode(get_document_content(doc["id"])), caption=doc["name"], width=400)
+        elif is_markdown_doc(doc):
+            st.markdown(base64.b64decode(get_document_content(doc["id"])).decode("utf-8", errors="replace"))
+        else:
+            text = db.get_document_text(doc["id"]) if text is None else text
+            if text.strip():
+                st.text(text[:6000] + ("\n[…]" if len(text) > 6000 else ""))
+            else:
+                st.caption("Ehhez a fájlhoz nincs szöveges előnézet; letöltve megnyitható.")
+    except Exception:
+        st.warning("Az előnézet nem tölthető be.")
+
+
 # --- A CHATBEN KÉSZÜLT FÁJLOK NYOMON KÖVETÉSE ---
 # Ezeket a sorokat az alkalmazás fűzi Piri válasza alá (nem Piri írja).
 CREATED_MARK = "📎 **Elkészült:**"
 PROBLEM_MARK = "⚠️ **Figyelem:**"
+
 
 def created_names(content):
     """Az üzenet alá fűzött „Elkészült” sorból a fájlnevek."""
@@ -163,24 +219,25 @@ def created_names(content):
             return list(dict.fromkeys(re.findall(r"`([^`]+)`", line)))
     return []
 
+
 def strip_app_notes(content):
     """Az alkalmazás által hozzáfűzött sorok nélkül adjuk vissza a választ Pirinek, különben utánozni kezdi
     őket: „Elkészült”-et ír úgy, hogy valójában nem hívta meg a dokumentumkészítő eszközt."""
     kept = [l for l in str(content).splitlines() if not l.startswith((CREATED_MARK, PROBLEM_MARK))]
     return "\n".join(kept).strip() or "(A fájl elkészült.)"
 
+
 def find_doc(docs, name, not_after=None):
     """A megadott nevű dokumentum; azonos nevűek közül az, amelyik az üzenet előtt utoljára készült."""
     same = [d for d in docs if d["name"] == name]  # a lista a legújabbal kezdődik
-    if same and not_after:
-        try:
-            limit = datetime.fromisoformat(str(not_after))
-            for d in same:
-                if datetime.fromisoformat(str(d["created_at"])) <= limit:
-                    return d
-        except Exception:
-            pass
+    limit = parse_ts(not_after) if not_after else None
+    if same and limit:
+        for d in same:
+            created = parse_ts(d.get("created_at"))
+            if created and created <= limit:
+                return d
     return same[0] if same else None
+
 
 def unique_name(name, taken):
     """Ha már van ilyen nevű fájl a projektben, sorszámot kap (így az új változat nem keveredik a régivel)."""
@@ -192,303 +249,819 @@ def unique_name(name, taken):
         n += 1
     return f"{stem}_{n}.{ext}"
 
-# --- OLDALSÁV (SIDEBAR) ---
-with st.sidebar:
-    st.header("🗂️ Projektek")
-    
-    with st.form("project_form", clear_on_submit=True):
-        new_project_name = st.text_input("Új téma / projekt neve:")
-        submit_button = st.form_submit_button("➕ Projekt létrehozása", use_container_width=True)
-        if submit_button and new_project_name.strip():
-            create_project(new_project_name)
 
-    st.divider()
-    
-    active_projects = get_projects("active")
-    if active_projects:
-        st.subheader("Aktív ügyek")
-        project_options = {p["name"]: p["id"] for p in active_projects if "name" in p}
-        valasztott_nev = st.radio("Válassz projektet:", list(project_options.keys()))
-        current_project_id = project_options[valasztott_nev] if valasztott_nev else None
-    else:
-        st.info("Nincs aktív projekt.")
-        current_project_id = None
+# --- A MODELLNEK ÁTADOTT TARTALOM ÖSSZEÁLLÍTÁSA -------------------------------
+def file_parts(name, mime, b64_data):
+    """Egy fájl a modell számára. Visszaad: (tartalomblokkok, szöveges mellékletek)."""
+    if mime.startswith("image/"):
+        return [{"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64_data}}], []
+    if mime == ex.PDF_MIME:
+        return [{"type": "document", "title": name,
+                 "source": {"type": "base64", "media_type": ex.PDF_MIME, "data": b64_data}}], []
+    text = None
+    if mime.startswith("text/"):
+        text = base64.b64decode(b64_data).decode("utf-8", errors="replace")
+    elif mime in (ex.XLSX_MIME, ex.PPTX_MIME, ex.DOCX_MIME):  # szöveggé alakítva (a képletek is látszanak)
+        try:
+            text = ex.office_to_text(mime, base64.b64decode(b64_data))
+        except Exception:
+            text = None
+    return [], ([f"[Mellékelt fájl tartalma ({name}):\n{text}]"] if text else [])
 
-# --- FŐKÉPERNYŐ CHAT ÉS FÁJLKEZELŐ FUNKCIÓVAL ---
-if current_project_id:
-    # A projekt saját dokumentumtára (itt csak a metaadatok; a tartalom igény szerint töltődik be)
-    project_docs = get_documents(current_project_id)
+
+def user_content(text, files):
+    """Felhasználói üzenet tartalma: files = [(név, mime, base64)], a szöveg a végére kerül."""
+    blocks, texts = [], []
+    for name, mime, b64_data in files:
+        b, t = file_parts(name, mime, b64_data)
+        blocks += b
+        texts += t
+    full_text = "\n\n".join(texts + [text])
+    return blocks + [{"type": "text", "text": full_text}] if blocks else full_text
+
+
+def load_attachment_files(attachments):
+    files = []
+    for att in attachments:
+        try:
+            files.append((att["name"], att["mime_type"], get_attachment_content(att["id"])))
+        except Exception:
+            pass  # a hiányzó munkaanyag ne akassza meg a beszélgetést
+    return files
+
+
+def build_history(messages, atts_by_msg):
+    """A tárolt beszélgetés a modell számára, az üzenetekhez csatolt munkaanyagokkal együtt."""
+    history = []
+    for m in messages:
+        if m.get("role") == "assistant":
+            history.append({"role": "assistant", "content": strip_app_notes(m["content"])})
+        elif m.get("role") == "user":
+            files = load_attachment_files(atts_by_msg.get(m.get("id"), []))
+            history.append({"role": "user", "content": user_content(m["content"], files)})
+    return history
+
+
+def summaries_for_prompt(summaries):
+    if not summaries:
+        return ""
+    parts = [f"### Összefoglaló – {fmt_dt(s['created_at'])}\n{s['content']}" for s in summaries]
+    return (
+        "\n\nKORÁBBI ÖSSZEFOGLALÓK:\n"
+        "A projekt korábbi beszélgetéseit a felhasználó összefoglaltatta veled, majd törölte; az alábbi "
+        "összefoglalók tartalmazzák, ami azokból megmaradt (időrendben). Tekintsd ezeket a saját korábbi "
+        "ismereteidnek, építs rájuk, és ha a felhasználó kéri, mutasd meg őket.\n\n" + "\n\n".join(parts)
+    )
+
+
+def build_system(summaries):
+    # SYSTEM PROMPT A GYÖNYÖRŰ MAGYAR JOGI NYELVÉRT
+    return (
+        "Te egy professzionális, rendkívül intelligens és precíz jogi és törvényelemző AI asszisztens vagy, "
+        "akit Piritának (vagy röviden Pirinek) hívnak. Feladatod, hogy a felhasználót maximális szakértelemmel, "
+        "részletesen, ugyanakkor teljesen érthetően segítsd az adózási, vállalkozási és bonyolult jogi ügyekben.\n"
+        "Képes vagy képek, képernyőképek és dokumentumok elemzésére is. Ha a felhasználó képet küld, "
+        "elemezd azt tűpontosan és válaszolj a kérdéseire.\n\n"
+        "KÖTELEZŐEN BETARTANDÓ SZABÁLYOK:\n"
+        "1. Kizárólag tökéletes, érett, szakmailag hiteles és nyelvtanilag teljesen hibátlan MAGYAR nyelven válaszolj!\n"
+        "2. Kerüld a tükörfordításokat és az angolos, mesterkélt kifejezéseket. Fogalmazz úgy, mint egy tapasztalt hazai tanácsadó.\n"
+        "3. A válaszaid legyenek alaposak és strukturáltak. Használj vastag betűs kiemeléseket és listákat.\n"
+        "4. Ne siesd el a választ, fejtsd ki részletesen a pontokat!\n\n"
+        "INTERNETES KERESÉS:\n"
+        f"A mai dátum: {date.today().isoformat()}. Van internetes keresési lehetőséged. "
+        "A tudásod egy jóval korábbi időpontig tart, ezért a hatályos jogszabályokra, adómértékekre, határidőkre, "
+        "díjakra, hatósági szabályokra és minden aktuális adatra keress rá, mielőtt válaszolsz, még ha biztosnak is érzed magad. "
+        "Magyar jogi és adózási kérdésekben elsősorban hivatalos forrásokat használj (pl. njt.hu, nav.gov.hu, magyarkozlony.hu). "
+        "A válaszban jelöld meg, mely forrásokra támaszkodtál.\n\n"
+        "DOKUMENTUMKÉSZÍTÉS:\n"
+        "Ha a felhasználó dokumentum, táblázat vagy prezentáció készítését kéri, használd a megfelelő eszközt: "
+        "create_document (szöveges dokumentum, amelyet a felhasználó Word, PDF vagy Markdown formátumban tölt le), "
+        "create_spreadsheet (Excel táblázat, amelyben a számolt értékek képletek, a számok pedig megfelelő "
+        "számformátumúak legyenek, hogy a felhasználó tovább tudjon dolgozni vele), "
+        "create_presentation (PowerPoint). Egyszerű kérdésre ne készíts fájlt, arra a chatben válaszolj. "
+        "Fájl kizárólag az eszköz tényleges meghívásával jön létre: a kért dokumentum teljes szövegét ne a "
+        "chatbe írd, hanem az eszköznek add át, és soha ne állítsd, hogy egy fájl elkészült, ha az eszköz "
+        "ezt nem igazolta vissza. Nagyon hosszú anyagot bonts több fájlra, válaszonként egy eszközhívással. "
+        "A fájl elkészítése után röviden írd le, mit tartalmaz és mire kell figyelni; a letöltőgombokat az "
+        "alkalmazás teszi a válaszod alá, te ne írj letöltési hivatkozást vagy „Elkészült” sort. "
+        "A korábban elkészült fájlok tartalmát a mellékelt dokumentumok között látod; "
+        "módosítást új fájl készítésével végezz, és jelezd, hogy új változat készült. "
+        "Ha egy állítás bizonytalan vagy ellenőrzést igényel, a dokumentumban is jelöld.\n\n"
+        "MUNKAANYAGOK:\n"
+        "A felhasználó a kérdéseihez képet vagy fájlt csatolhat. Ezek munkaanyagok: a beszélgetés részei, de "
+        "nem kerülnek a projekt dokumentumtárába, és az előzmények törlésekor törlődnek."
+        + summaries_for_prompt(summaries)
+    )
+
+
+def summary_system(summaries):
+    return (
+        "Te Pirita (Piri) vagy, professzionális magyar jogi és adózási AI asszisztens. Most nem kérdésre "
+        "válaszolsz, hanem a saját, felhasználóval folytatott beszélgetésedről írsz pontos, tömör, de "
+        "hiánytalan összefoglalót, kifogástalan magyar nyelven." + summaries_for_prompt(summaries)
+    )
+
+
+# --- PROJEKTMŰVELETEK --------------------------------------------------------
+def open_project(project_id):
+    """Projekt megnyitása; a megnyitás idejét eltároljuk, hogy legközelebb ez induljon."""
+    st.session_state["current_project_id"] = project_id
+    st.session_state["view"] = "project"
+    try:
+        db.update_project(project_id, last_opened_at=db.now_iso())
+    except db.DbError:
+        pass  # ha nem sikerül eltárolni, a projekt attól még megnyílik
+
+
+def top_sort_order(projects):
+    orders = [p["sort_order"] for p in projects if p.get("sort_order") is not None]
+    return (min(orders) if orders else 0) - 1
+
+
+def move_project(active, project_id, delta):
+    """A projekt eggyel feljebb (-1) vagy lejjebb (+1) kerül; a sorrendet sorszámként tároljuk."""
+    ids = [p["id"] for p in active]
+    i = ids.index(project_id)
+    j = i + delta
+    if not 0 <= j < len(ids):
+        return
+    ids[i], ids[j] = ids[j], ids[i]
+    current = {p["id"]: p.get("sort_order") for p in active}
+    for n, pid in enumerate(ids):
+        if current[pid] != n:
+            db.update_project(pid, sort_order=n)
+
+
+def dialog(title, on_dismiss, **kwargs):
+    """st.dialog; az ablak X-szel bezárásakor az on_dismiss törli a „nyitva van” jelzést (ahol a Streamlit tudja)."""
+    if "on_dismiss" in inspect.signature(st.dialog).parameters:
+        kwargs["on_dismiss"] = on_dismiss
+    return st.dialog(title, **kwargs)
+
+
+def _close_delete_dialog():
+    st.session_state.pop("delete_open", None)
+
+
+@dialog("Projekt végleges törlése", _close_delete_dialog)
+def delete_dialog(project):
+    st.write(f"Biztosan törlöd a(z) **{project['name']}** projektet?")
+    st.warning("A törlés végleges, és mindent visz: a beszélgetést, a csatolt munkaanyagokat, "
+               "a dokumentumtár összes fájlját és az összefoglalókat.")
+    c1, c2 = st.columns(2)
+    if c1.button("🗑️ Igen, végleges törlés", type="primary", key="delete_yes", **STRETCH):
+        try:
+            db.delete_project(project["id"])
+        except db.DbError as e:
+            st.error(f"A törlés nem sikerült: {e}")
+            return
+        _close_delete_dialog()
+        st.session_state.pop("current_project_id", None)
+        st.rerun()
+    if c2.button("Mégse", key="delete_no", **STRETCH):
+        _close_delete_dialog()
+        st.rerun()
+
+
+# --- ÖSSZEFOGLALÁS ÉS ELŐZMÉNYEK TÖRLÉSE --------------------------------------
+def _close_compact_dialog():
+    st.session_state.pop("compact_open", None)
+
+
+@dialog("🧹 Összefoglalás és előzmények törlése", _close_compact_dialog, width="large")
+def compact_dialog(project, messages, atts_by_msg, summaries, project_docs):
+    pid = project["id"]
+    message_ids = [m["id"] for m in messages if m.get("id") is not None]
+    signature = (pid, len(messages), messages[-1].get("id"))
+    draft = st.session_state.get("compact_draft")
+    n_atts = sum(len(v) for v in atts_by_msg.values())
+
+    def generate(fix_request="", previous=""):
+        return chat_flow.summarize(
+            claude_client, MODEL, summary_system(summaries), build_history(messages, atts_by_msg),
+            doc_names=[d["name"] for d in project_docs], fix_request=fix_request, previous_draft=previous)
+
+    if not draft or draft["signature"] != signature:
+        with st.spinner("Piri összefoglalja a beszélgetést…"):
+            try:
+                description, content = generate()
+            except Exception as e:
+                st.error(f"Az összefoglaló nem készült el: {e}")
+                st.caption("Semmi nem törlődött. Zárd be az ablakot, és próbáld meg újra.")
+                return
+        draft = {"signature": signature, "description": description, "content": content, "nonce": 0}
+        st.session_state["compact_draft"] = draft
+
+    st.caption(
+        f"Ez Piri tervezete. Nézd át, és ha kell, írd át. Jóváhagyás után a projekt {len(messages)} üzenete"
+        + (f" és {n_atts} csatolt munkaanyaga" if n_atts else "")
+        + " véglegesen törlődik az adatbázisból, és Piri ezután az összefoglalókból dolgozik. "
+          "A dokumentumtár nem változik.")
+    nonce = draft["nonce"]
+    description = st.text_area("Rövid leírás (2–3 mondat, ez látszik a listában)", value=draft["description"],
+                               height=90, key=f"cd_desc_{nonce}")
+    content = st.text_area("Összefoglaló (Markdown)", value=draft["content"], height=360, key=f"cd_content_{nonce}")
+    with st.expander("Előnézet formázva"):
+        st.markdown(content)
+    fix_request = st.text_input("Mit javítson rajta Piri? (csak az újraíráshoz kell)", key=f"cd_fix_{nonce}",
+                                placeholder="pl. írd bele a három leányvállalat pontos számait is")
+
+    c1, c2, c3 = st.columns([2.2, 1.6, 1])
+    if c1.button("✅ Jóváhagyás és előzmények törlése", type="primary", key="cd_approve", **STRETCH):
+        if not content.strip():
+            st.error("Az összefoglaló üres, így nem menthető.")
+            return
+        try:
+            db.add_summary(pid, description.strip(), content.strip())
+        except db.DbError as e:
+            st.error(f"Az összefoglaló mentése nem sikerült, ezért semmi nem törlődött: {e}")
+            return
+        try:
+            db.delete_messages(pid, message_ids)
+        except db.DbError as e:
+            st.session_state["chat_flash"] = ("error", "Az összefoglaló elmentve, de az előzmények törlése "
+                                                       f"nem sikerült: {e}")
+        else:
+            st.session_state["chat_flash"] = ("success", "Az összefoglaló elkészült, az előzmények törölve. "
+                                                         "Az Összefoglalók fülön megnézheted és szerkesztheted.")
+        st.session_state.pop("compact_draft", None)
+        _close_compact_dialog()
+        st.rerun()
+    if c2.button("🔄 Újraírás Pirivel", key="cd_rewrite", **STRETCH):
+        with st.spinner("Piri újraírja az összefoglalót…"):
+            try:
+                new_description, new_content = generate(
+                    fix_request.strip() or "Írd meg újra, alaposabban és pontosabban.",
+                    f"LEÍRÁS: {description}\n{chat_flow.SUMMARY_SEPARATOR}\n{content}")
+            except Exception as e:
+                st.error(f"Az újraírás nem sikerült: {e}")
+                return
+        st.session_state["compact_draft"] = {"signature": signature, "description": new_description,
+                                             "content": new_content, "nonce": nonce + 1}
+        st.rerun()
+    if c3.button("Mégse", key="cd_cancel", **STRETCH):
+        # a kézzel átírt szöveget megőrizzük, hogy újranyitáskor ne vesszen el
+        st.session_state["compact_draft"] = {**draft, "description": description, "content": content,
+                                             "nonce": nonce + 1}
+        _close_compact_dialog()
+        st.rerun()
+
+
+def compact_button(project, key):
+    if st.button("🧹 Összefoglalás és előzmények törlése", key=key,
+                 help="Piri összefoglalja az eddigi beszélgetést; jóváhagyásod után az üzenetek törlődnek, "
+                      "és Piri az összefoglalóból dolgozik tovább."):
+        st.session_state["compact_open"] = project["id"]
+        st.rerun()
+
+
+# --- BESZÉLGETÉS FÜL ---------------------------------------------------------
+def show_flash(key):
+    flash = st.session_state.pop(key, None)
+    if flash:
+        getattr(st, flash[0])(flash[1])
+
+
+def attachment_caption(attachments):
+    names = ", ".join(a["name"] for a in attachments)
+    return f"📎 {names} (munkaanyag, nem kerül a dokumentumtárba)"
+
+
+def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summaries):
+    pid = project["id"]
     docs_by_id = {d["id"]: d for d in project_docs}
 
-    tab_chat, tab_docs, tab_diagrams = st.tabs(["💬 Beszélgetés", "📄 Dokumentumok és Képek csatolása", "📊 Folyamatábrák"])
+    # Felső sor: mely projektdokumentumokat lássa Piri, és az összefoglalás gombja
+    col_docs, col_compact, _ = st.columns([2.4, 3, 4.6])
+    selected_doc_ids = []
+    if project_docs and not readonly:
+        doc_ids = [d["id"] for d in project_docs]
+        with col_docs.popover(f"📎 Piri dokumentumai ({len(project_docs)})"):
+            selected_doc_ids = st.multiselect(
+                "Ezeket a projektdokumentumokat veszi figyelembe Piri a következő kérdésnél:",
+                options=doc_ids, default=doc_ids, format_func=lambda i: docs_by_id[i]["name"],
+                key=f"ctx_{pid}_{'_'.join(map(str, doc_ids))}",
+            )
+    if messages and not readonly:
+        with col_compact:
+            compact_button(project, "compact_btn_chat")
 
-    with tab_docs:
-        st.subheader(f"📁 A(z) „{valasztott_nev}” projekt dokumentumtára")
-        st.write("Az itt tárolt dokumentumok (TXT, PDF), képek (PNG, JPG) és a Piri által készített fájlok (szöveges dokumentum, Excel, PowerPoint) kizárólag ehhez a projekthez tartoznak, más projektben nem jelennek meg.")
-
-        flash = st.session_state.pop("docs_flash", None)
-        if flash:
-            getattr(st, flash[0])(flash[1])
-
-        # A kulcsban lévő számláló nullázza a feltöltőt mentés után, így nem mentjük el kétszer ugyanazt
-        nonce = st.session_state.get("uploader_nonce", {}).get(current_project_id, 0)
-        uploaded_files = st.file_uploader(
-            "Válassz fájlokat vagy képeket:",
-            type=["txt", "pdf", "png", "jpg", "jpeg"],
-            accept_multiple_files=True,
-            key=f"uploader_{current_project_id}_{nonce}",
-        )
-
-        if uploaded_files and st.button("💾 Feltöltés a projekt dokumentumtárába", type="primary"):
-            saved, failed = 0, []
-            for f in uploaded_files:
-                if f.size > MAX_FILE_MB * 1024 * 1024:
-                    failed.append(f"{f.name} (nagyobb, mint {MAX_FILE_MB} MB)")
+    chat_box = st.container(height=FALLBACK_HEIGHT_PX, border=False, key="chat_box")
+    with chat_box:
+        if not messages:
+            st.caption("Az előzményeket összefoglaló váltotta fel (lásd az Összefoglalók fület); Piri azokból dolgozik."
+                       if summaries else "Ebben a projektben még nincs üzenet.")
+        for i, msg in enumerate(messages):
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+                if msg["role"] == "user":
+                    if atts_by_msg.get(msg.get("id")):
+                        st.caption(attachment_caption(atts_by_msg[msg["id"]]))
                     continue
-                ok, detail = save_document(current_project_id, f)
-                if ok:
-                    saved += 1
-                else:
-                    failed.append(f"{f.name} ({detail})")
-            if failed:
-                msg = "Nem sikerült feltölteni: " + "; ".join(failed) + "."
-                if saved:
-                    msg += f" Sikeresen feltöltve: {saved} fájl."
-                st.session_state["docs_flash"] = ("error", msg)
-            else:
-                st.session_state["docs_flash"] = ("success", f"{saved} fájl feltöltve a projekthez.")
-            st.session_state.setdefault("uploader_nonce", {})[current_project_id] = nonce + 1
-            st.rerun()
+                # A válaszban készült fájlok letöltése közvetlenül a chatből: a legutóbbi válasznál azonnal
+                # látszanak a gombok, a régebbieknél pipára töltődnek be (hogy ne lassítsák az oldalt).
+                msg_key = msg.get("id", i)
+                for name in created_names(msg["content"]):
+                    doc = find_doc(project_docs, name, msg.get("created_at"))
+                    if not doc:
+                        st.caption(f"`{name}` nem található a dokumentumtárban.")
+                    elif i == len(messages) - 1 or st.checkbox(f"⬇️ {name} letöltése",
+                                                               key=f"chat_dl_{msg_key}_{doc['id']}"):
+                        render_downloads(doc, key_prefix=f"chat_{msg_key}_")
 
-        st.divider()
+        # Ha Piri a dokumentumot a chatbe írta (fájl nélkül), egy kattintással letölthető fájl lesz belőle
+        last = messages[-1] if messages else None
+        if last and not readonly and last["role"] == "assistant" and not created_names(last["content"]):
+            saved_answers = st.session_state.setdefault("saved_answers", {})
+            answer_key = f"{pid}:{last.get('id', len(messages))}"
+            if answer_key in saved_answers:
+                saved_doc = find_doc(project_docs, saved_answers[answer_key])
+                if saved_doc:
+                    render_downloads(saved_doc, key_prefix="saved_")
+            elif st.button("💾 A legutóbbi válasz mentése dokumentumként", key=f"save_answer_{answer_key}",
+                           help="Piri válasza a dokumentumtárba kerül, és Word, PDF vagy Markdown formátumban letölthető."):
+                body = strip_app_notes(last["content"])
+                heading = re.search(r"^#{1,3}\s+(.+)$", body, flags=re.MULTILINE)
+                title = heading.group(1).strip("* ") if heading else f"Piri válasza {date.today().isoformat()}"
+                file_name = unique_name(ex.safe_filename(title, "md"), {d["name"] for d in project_docs})
+                ok, detail = save_document_bytes(pid, file_name, ex.MD_MIME, (body + "\n").encode("utf-8"))
+                if ok:
+                    saved_answers[answer_key] = file_name
+                    st.rerun()
+                else:
+                    st.error(f"A mentés nem sikerült: {detail}")
+
+    if readonly:
+        st.info("Ez a projekt le van zárva, ezért csak olvasható. Kérdezni az oldalsáv „Újranyitás” gombja után lehet.")
+        return
+
+    show_flash("chat_flash")
+    submitted = st.chat_input("Kérdezz Piritól; a gemkapoccsal képet vagy fájlt is csatolhatsz a kérdéshez…",
+                              accept_file="multiple", file_type=ATTACH_TYPES, key=f"chat_input_{pid}")
+    if not submitted:
+        return
+    question = (submitted if isinstance(submitted, str) else submitted.text or "").strip()
+    uploads = [] if isinstance(submitted, str) else list(submitted.files or [])
+
+    # A csatolt munkaanyagok ellenőrzése
+    new_files, rejected = [], []
+    for f in uploads:
+        mime = guess_mime(f.name, f.type)
+        limit_mb = MAX_IMAGE_MB if mime.startswith("image/") else MAX_FILE_MB
+        if f.size > limit_mb * 1024 * 1024:
+            rejected.append(f"{f.name} (nagyobb, mint {limit_mb} MB)")
+        else:
+            new_files.append((f.name, mime, f.getvalue()))
+    if not question and not new_files:
+        st.session_state["chat_flash"] = ("error", "Nem csatoltam: " + "; ".join(rejected) + ".")
+        st.rerun()
+    question = question or "Kérlek, nézd meg a csatolt fájlt."
+
+    with chat_box:
+        with st.chat_message("user"):
+            st.write(question)
+            if new_files:
+                st.caption(attachment_caption([{"name": n} for n, _, _ in new_files]))
+
+        # Mentés: az üzenet, majd hozzá kötve a munkaanyagok (ezek nem kerülnek a dokumentumtárba)
+        try:
+            saved = db.save_message(pid, "user", question)
+        except db.DbError as e:
+            st.error(f"Az üzenet mentése nem sikerült: {e}")
+            return
+        current_files = []
+        for name, mime, data in new_files:
+            try:
+                if saved and saved.get("id") is not None:
+                    db.save_attachment(pid, saved["id"], name, mime, data)
+                current_files.append((name, mime, base64.b64encode(data).decode("ascii")))
+            except db.DbError as e:
+                rejected.append(f"{name} ({e})")
+
+        # Csak az aktuális projekt kiválasztott dokumentumai kerülhetnek a kérdés mellé
+        doc_files = []
+        for doc_id in selected_doc_ids:
+            doc = docs_by_id.get(doc_id)
+            if not doc:
+                continue
+            try:
+                doc_files.append((doc["name"], doc["mime_type"], get_document_content(doc_id)))
+            except Exception:
+                st.error(f"A(z) {doc['name']} dokumentum nem tölthető be, ezért nem csatoltam.")
+
+        api_messages = build_history(messages, atts_by_msg)
+        api_messages.append({"role": "user", "content": user_content(question, doc_files + current_files)})
+
+        # Eszközök: a beépített webes kereső (az Anthropic szerverein fut) és a dokumentumkészítők (nálunk futnak)
+        tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}] + ex.TOOLS
+        taken_names = {d["name"] for d in project_docs}
+
+        def save_created_file(name, mime, data):
+            """Piri által készített fájl mentése; siker esetén a tárolt (egyedi) fájlnevet adja vissza."""
+            final_name = unique_name(name, taken_names)
+            ok, detail = save_document_bytes(pid, final_name, mime, data)
+            if ok:
+                taken_names.add(final_name)
+            return ok, (final_name if ok else detail)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Piri elemzi a tartalmat, keres és gondolkodik… (hosszabb dokumentumnál ez több perc is lehet)"):
+                answer, sources, created_files, problems = chat_flow.run_conversation(
+                    claude_client, MODEL, build_system(summaries), api_messages, tools, save_created_file)
+            answer = answer or "(Piri most nem adott szöveges választ.)"
+            # A hibát az elmentett válaszba is beírjuk, mert az oldal rögtön újratöltődik
+            if problems:
+                answer += f"\n\n{PROBLEM_MARK} " + " ".join(problems)
+            if created_files:
+                answer += (f"\n\n{CREATED_MARK} " + ", ".join(f"`{n}`" for n in created_files)
+                           + " – itt lent és a **Dokumentumok** fülön is letölthető.")
+            if sources:
+                answer += "\n\n**Források:**\n" + "\n".join(f"- [{title}]({url})" for url, title in sources.items())
+            st.write(answer)
+
+    try:
+        db.save_message(pid, "assistant", answer)
+    except db.DbError as e:
+        st.session_state["chat_flash"] = ("error", f"Piri válaszának mentése nem sikerült: {e}")
+    if rejected:
+        st.session_state["chat_flash"] = ("warning", "Nem csatoltam: " + "; ".join(rejected) + ".")
+    st.rerun()
+
+
+# --- DOKUMENTUMOK FÜL --------------------------------------------------------
+def render_docs_tab(project, readonly, project_docs):
+    pid = project["id"]
+    with st.container(height=FALLBACK_HEIGHT_PX, border=False, key="docs_box"):
+        st.caption("A projekt jóváhagyott dokumentumai és a Piri által készített fájlok. Kizárólag ehhez a "
+                   "projekthez tartoznak; a beszélgetésbe csatolt munkaanyagok nem ide kerülnek.")
+        show_flash("docs_flash")
+
+        if not readonly:
+            # A kulcsban lévő számláló nullázza a feltöltőt mentés után, így nem mentjük el kétszer ugyanazt
+            nonce = st.session_state.get("uploader_nonce", {}).get(pid, 0)
+            uploaded_files = st.file_uploader(
+                "Projektdokumentum feltöltése (TXT, PDF, PNG, JPG):",
+                type=["txt", "pdf", "png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+                key=f"uploader_{pid}_{nonce}",
+            )
+            if uploaded_files and st.button("💾 Feltöltés a projekt dokumentumtárába", type="primary"):
+                saved, failed = 0, []
+                for f in uploaded_files:
+                    if f.size > MAX_FILE_MB * 1024 * 1024:
+                        failed.append(f"{f.name} (nagyobb, mint {MAX_FILE_MB} MB)")
+                        continue
+                    ok, detail = save_document_bytes(pid, f.name, guess_mime(f.name, f.type), f.getvalue())
+                    if ok:
+                        saved += 1
+                    else:
+                        failed.append(f"{f.name} ({detail})")
+                if failed:
+                    msg = "Nem sikerült feltölteni: " + "; ".join(failed) + "."
+                    if saved:
+                        msg += f" Sikeresen feltöltve: {saved} fájl."
+                    st.session_state["docs_flash"] = ("error", msg)
+                else:
+                    st.session_state["docs_flash"] = ("success", f"{saved} fájl feltöltve a projekthez.")
+                st.session_state.setdefault("uploader_nonce", {})[pid] = nonce + 1
+                st.rerun()
+            st.divider()
+
         if not project_docs:
             st.info("Ebben a projektben még nincs dokumentum.")
         for doc in project_docs:
-            mime = doc["mime_type"]
-            is_image = mime.startswith("image/")
-            is_md = is_markdown_doc(doc)
-            icon = ("🖼️" if is_image else "📝" if is_md else "📊" if mime == ex.XLSX_MIME
-                    else "📽️" if mime == ex.PPTX_MIME else "📄")
             col_info, col_dl, col_prev, col_del = st.columns([5, 1.7, 1.7, 0.8])
             size_kb = max(1, round((doc.get("size_bytes") or 0) / 1024))
-            col_info.write(f"{icon} **{doc['name']}** · {size_kb} KB · {str(doc.get('created_at', ''))[:10]}")
+            col_info.write(f"{doc_icon(doc)} **{doc['name']}** · {size_kb} KB · {fmt_dt(doc.get('created_at'))[:10]}")
             want_download = col_dl.checkbox("Letöltés", key=f"dl_{doc['id']}")
-            want_preview = (is_image or is_md) and col_prev.checkbox("Előnézet", key=f"prev_{doc['id']}")
-            if col_del.button("🗑️", key=f"del_{doc['id']}", help="Dokumentum törlése a projektből"):
-                if delete_document(doc["id"]):
+            want_preview = col_prev.checkbox("Előnézet", key=f"prev_{doc['id']}")
+            if not readonly and col_del.button("🗑️", key=f"del_{doc['id']}", help="Dokumentum törlése a projektből"):
+                try:
+                    db.delete_document(doc["id"])
                     st.rerun()
-                else:
-                    st.error("A törlés nem sikerült.")
+                except db.DbError as e:
+                    st.error(f"A törlés nem sikerült: {e}")
             if want_download:
                 render_downloads(doc)
             if want_preview:
-                try:
-                    raw = base64.b64decode(get_document_content(doc["id"]))
-                    if is_image:
-                        st.image(raw, caption=doc["name"], width=400)
+                with st.container(border=True):
+                    render_doc_preview(doc)
+
+
+# --- ÖSSZEFOGLALÓK FÜL -------------------------------------------------------
+def render_summaries_tab(project, readonly, summaries, messages):
+    with st.container(height=FALLBACK_HEIGHT_PX, border=False, key="sums_box"):
+        st.caption("Az összefoglalók a törölt előzmények helyett őrzik a projekt lényegét; Piri mindegyiket "
+                   "megkapja. Összefoglaló csak a projekt törlésével törlődik.")
+        show_flash("sums_flash")
+        if not readonly:
+            if messages:
+                compact_button(project, "compact_btn_tab")
+            else:
+                st.caption("Új összefoglaló akkor készíthető, ha van beszélgetés a projektben.")
+        if not summaries:
+            st.info("Ebben a projektben még nincs összefoglaló.")
+        edit_nonce = st.session_state.get("sum_edit_nonce", 0)  # mentés után ez zárja be a szerkesztőt
+        for s in reversed(summaries):  # a legfrissebb elöl
+            st.divider()
+            edited = f" · szerkesztve: {fmt_dt(s['updated_at'])}" if s.get("updated_at") else ""
+            st.markdown(f"**📋 {fmt_dt(s['created_at'])}**{edited}")
+            st.write(s.get("description") or "(nincs leírás)")
+            with st.expander("Teljes összefoglaló"):
+                st.markdown(s["content"])
+            if not readonly and st.toggle("✏️ Szerkesztés", key=f"sum_edit_{s['id']}_{edit_nonce}"):
+                new_description = st.text_area("Rövid leírás", value=s.get("description") or "", height=90,
+                                               key=f"sum_desc_{s['id']}_{edit_nonce}")
+                new_content = st.text_area("Összefoglaló (Markdown)", value=s["content"], height=320,
+                                           key=f"sum_content_{s['id']}_{edit_nonce}")
+                if st.button("💾 Módosítás mentése", key=f"sum_save_{s['id']}", type="primary"):
+                    if not new_content.strip():
+                        st.error("Az összefoglaló nem lehet üres.")
                     else:
-                        with st.container(border=True):
-                            st.markdown(raw.decode("utf-8", errors="replace"))
-                except Exception:
-                    st.warning("Az előnézet nem tölthető be.")
-    
-    with tab_chat:
-        st.subheader(f"Folyamatban lévő ügy: {valasztott_nev}")
+                        try:
+                            db.update_summary(s["id"], new_description.strip(), new_content.strip())
+                            st.session_state["sum_edit_nonce"] = edit_nonce + 1
+                            st.session_state["sums_flash"] = ("success", "Az összefoglaló módosítva.")
+                            st.rerun()
+                        except db.DbError as e:
+                            st.error(f"A mentés nem sikerült: {e}")
 
-        # Melyik projekt-dokumentumokat vegye figyelembe Piri (alapból mindet)
-        selected_doc_ids = []
-        if project_docs:
-            with st.expander(f"📎 Piri számára csatolt dokumentumok ({len(project_docs)} a projektben)"):
-                doc_ids = [d["id"] for d in project_docs]
-                selected_doc_ids = st.multiselect(
-                    "Ezeket veszi figyelembe Piri a következő kérdésnél:",
-                    options=doc_ids,
-                    default=doc_ids,
-                    format_func=lambda i: docs_by_id[i]["name"],
-                    key=f"ctx_{current_project_id}_{'_'.join(map(str, doc_ids))}",
-                )
-        
-        messages = get_messages(current_project_id)
-        if messages and isinstance(messages, list):
-            for i, msg in enumerate(messages):
-                with st.chat_message(msg["role"]):
-                    st.write(msg["content"])
-                    if msg["role"] != "assistant":
-                        continue
-                    # A válaszban készült fájlok letöltése közvetlenül a chatből: a legutóbbi válasznál azonnal
-                    # látszanak a gombok, a régebbieknél pipára töltődnek be (hogy ne lassítsák az oldalt).
-                    msg_key = msg.get("id", i)
-                    for name in created_names(msg["content"]):
-                        doc = find_doc(project_docs, name, msg.get("created_at"))
-                        if not doc:
-                            st.caption(f"`{name}` nem található a dokumentumtárban.")
-                        elif i == len(messages) - 1 or st.checkbox(f"⬇️ {name} letöltése",
-                                                                   key=f"chat_dl_{msg_key}_{doc['id']}"):
-                            render_downloads(doc, key_prefix=f"chat_{msg_key}_")
 
-            # Ha Piri a dokumentumot a chatbe írta (fájl nélkül), egy kattintással letölthető fájl lesz belőle
-            last = messages[-1]
-            if last["role"] == "assistant" and not created_names(last["content"]):
-                saved_answers = st.session_state.setdefault("saved_answers", {})
-                answer_key = f"{current_project_id}:{last.get('id', len(messages))}"
-                if answer_key in saved_answers:
-                    saved_doc = find_doc(project_docs, saved_answers[answer_key])
-                    if saved_doc:
-                        render_downloads(saved_doc, key_prefix="saved_")
-                elif st.button("💾 A legutóbbi válasz mentése dokumentumként", key=f"save_answer_{answer_key}",
-                               help="Piri válasza a dokumentumtárba kerül, és Word, PDF vagy Markdown formátumban letölthető."):
-                    body = strip_app_notes(last["content"])
-                    heading = re.search(r"^#{1,3}\s+(.+)$", body, flags=re.MULTILINE)
-                    title = heading.group(1).strip("* ") if heading else f"Piri válasza {date.today().isoformat()}"
-                    file_name = unique_name(ex.safe_filename(title, "md"), {d["name"] for d in project_docs})
-                    ok, detail = save_document_bytes(current_project_id, file_name, ex.MD_MIME,
-                                                     (body + "\n").encode("utf-8"))
-                    if ok:
-                        saved_answers[answer_key] = file_name
-                        st.rerun()
-                    else:
-                        st.error(f"A mentés nem sikerült: {detail}")
+# --- KERESÉS -----------------------------------------------------------------
+def hit_opened(kind, item_id):
+    """„Megnyitás” jelölő egy találatnál. Az állapotát külön is megjegyezzük, hogy a projektbe ugrás után
+    a találati listához visszatérve ugyanazok a találatok legyenek nyitva."""
+    open_hits = st.session_state.setdefault("open_hits", set())
+    opened = st.checkbox("Megnyitás", value=(kind, item_id) in open_hits, key=f"hit_{kind}_{item_id}")
+    (open_hits.add if opened else open_hits.discard)((kind, item_id))
+    return opened
 
-        if user_input := st.chat_input("Kérdezz Piritól, vagy kérj elemzést a csatolt fájlra..."):
-            with st.chat_message("user"):
-                st.write(user_input)
-            
-            save_message(current_project_id, "user", user_input)
-            
-            api_messages = []
-            if messages and isinstance(messages, list):
-                api_messages = [
-                    {"role": m["role"],
-                     "content": strip_app_notes(m["content"]) if m["role"] == "assistant" else m["content"]}
-                    for m in messages if "role" in m
-                ]
-            
-            current_content = []
-            text_attachments = []
 
-            # Csak az aktuális projekt dokumentumai kerülhetnek a kérdés mellé
-            for doc_id in selected_doc_ids:
-                doc = docs_by_id.get(doc_id)
-                if not doc:
-                    continue
-                try:
-                    b64_data = get_document_content(doc_id)
-                except Exception:
-                    st.error(f"A(z) {doc['name']} dokumentum nem tölthető be, ezért nem csatoltam.")
-                    continue
-                mime = doc["mime_type"]
+def render_search(active, closed):
+    query = st.session_state.get("search_q", "").strip()
+    terms = stx.query_terms(query)
+    include_closed = bool(st.session_state.get("search_closed"))
+    scope = active + (closed if include_closed else [])
+    with st.container(height=FALLBACK_HEIGHT_PX, border=False, key="search_box"):
+        if not terms:
+            st.info("Írj be legalább egy, legalább kétbetűs keresőszót az oldalsáv keresőmezőjébe.")
+            return
+        try:
+            docs, sums = db.search([p["id"] for p in scope], stx.filter_stems(terms))
+        except db.DbError as e:
+            st.error(f"A keresés nem sikerült: {e}")
+            return
+        # az adatbázis csak előszűr; a pontos, szavankénti egyeztetés itt történik
+        docs = [d for d in docs if stx.matches(f"{d['name']}\n{d.get('content_text') or ''}", terms)]
+        sums = [x for x in sums if stx.matches(f"{x.get('description') or ''}\n{x['content']}", terms)]
+        where = "az aktív és a lezárt projektekben" if include_closed else "az aktív projektekben"
+        if not docs and not sums:
+            st.info(f"Nincs találat {where}." + ("" if include_closed or not closed else
+                                                " A lezárt projektekben nem kerestem; ehhez pipáld be az oldalsávban."))
+            return
+        hit_projects = {h["project_id"] for h in docs + sums}
+        st.caption(f"{len(docs) + len(sums)} találat {len(hit_projects)} projektben ({where}). Több keresőszónál "
+                   "mindegyiknek szerepelnie kell; a ragozott alakokat is megtalálja.")
 
-                # Képkezelés Base64 formátumban
-                if mime.startswith("image/"):
-                    current_content.append({
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": mime, "data": b64_data}
-                    })
+        for p in scope:
+            p_sums = [s for s in sums if s["project_id"] == p["id"]]
+            p_docs = [d for d in docs if d["project_id"] == p["id"]]
+            if not p_sums and not p_docs:
+                continue
+            st.divider()
+            col_name, col_go = st.columns([6, 2])
+            col_name.markdown(f"**📁 {p['name']}**" + ("" if p.get("status") == "active" else " (lezárt)"))
+            if col_go.button("➡️ Ugrás a projektre", key=f"goto_{p['id']}", **STRETCH):
+                open_project(p["id"])
+                st.rerun()
 
-                # PDF dokumentum csatolása Base64 formátumban
-                elif mime == "application/pdf":
-                    current_content.append({
-                        "type": "document",
-                        "source": {"type": "base64", "media_type": "application/pdf", "data": b64_data},
-                        "title": doc["name"]
-                    })
+            for s in p_sums:
+                snips = stx.snippets(s["content"], terms)
+                st.markdown(
+                    '<div class="piri-hit"><span class="title">📋 Összefoglaló</span>'
+                    f'<span class="meta">{fmt_dt(s["created_at"])}</span>'
+                    f'<div class="snip">{stx.highlight(s.get("description") or "", terms)}</div>'
+                    + "".join(f'<div class="snip">{sn}</div>' for sn in snips) + "</div>",
+                    unsafe_allow_html=True)
+                if hit_opened("sum", s["id"]):
+                    with st.container(border=True):
+                        st.markdown(s["content"])
 
-                # Szöveges fájl csatolása
-                elif mime.startswith("text/"):
-                    string_data = base64.b64decode(b64_data).decode("utf-8", errors="replace")
-                    text_attachments.append(f"[Mellékelt fájl tartalma ({doc['name']}):\n{string_data}]")
+            p_docs.sort(key=lambda d: -stx.count_hits(f"{d['name']}\n{d.get('content_text') or ''}", terms))
+            for d in p_docs:
+                text = d.get("content_text") or ""
+                snips = stx.snippets(text, terms)
+                st.markdown(
+                    f'<div class="piri-hit"><span class="title">{doc_icon(d)} {stx.highlight(d["name"], terms)}</span>'
+                    f'<span class="meta">{fmt_dt(d.get("created_at"))[:10]}</span>'
+                    + "".join(f'<div class="snip">{sn}</div>' for sn in snips) + "</div>",
+                    unsafe_allow_html=True)
+                if hit_opened("doc", d["id"]):
+                    with st.container(border=True):
+                        render_downloads(d, key_prefix="hit_")
+                        render_doc_preview(d, text=text)
 
-                # Excel / PowerPoint / Word: szöveggé alakítva (a képletek is látszanak)
-                elif mime in (ex.XLSX_MIME, ex.PPTX_MIME, ex.DOCX_MIME):
+
+def index_old_documents(rows):
+    """A régebben feltöltött dokumentumok szövegének kinyerése, hogy a keresés megtalálja őket."""
+    progress = st.progress(0.0, text="Dokumentumok feldolgozása…")
+    failed = []
+    for n, row in enumerate(rows, 1):
+        try:
+            data = base64.b64decode(db.get_document_content(row["id"]))
+            db.set_document_text(row["id"], row["name"], ex.extract_text(row["name"], row["mime_type"], data))
+        except Exception as e:
+            failed.append(f"{row['name']} ({e})")
+        progress.progress(n / len(rows), text=f"Dokumentumok feldolgozása… {n}/{len(rows)}")
+    return failed
+
+
+# =============================================================================
+# AZ OLDAL FELÉPÍTÉSE
+# =============================================================================
+inject_css()
+
+# Az adatbázis ellenőrzése munkamenetenként egyszer: megvannak-e az új oszlopok és táblák
+if not st.session_state.get("schema_ok"):
+    missing = db.check_schema()
+    if missing:
+        st.error("Az adatbázist frissíteni kell, mielőtt az alkalmazás használható. Hiányzik vagy nem érhető el: "
+                 + "; ".join(missing))
+        st.write("Nyisd meg a Supabase **SQL Editor** felületét, illeszd be az alábbi szkriptet (a `schema.sql` "
+                 "fájl tartalmát), futtasd le, majd töltsd újra ezt az oldalt. A szkript meglévő adatot nem töröl.")
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql"), encoding="utf-8") as fh:
+                st.code(fh.read(), language="sql")
+        except OSError:
+            st.warning("A schema.sql fájl nincs az alkalmazás mellett; töltsd fel a repóba.")
+        st.stop()
+    st.session_state["schema_ok"] = True
+
+try:
+    all_projects = db.get_projects()
+except db.DbError as e:
+    st.error(f"A projektek nem tölthetők be: {e}")
+    st.stop()
+
+active_projects = [p for p in all_projects if p.get("status") == "active"]
+closed_projects = [p for p in all_projects if p.get("status") != "active"]
+projects_by_id = {p["id"]: p for p in all_projects}
+
+# Induláskor a legutóbb használt aktív projekt nyílik meg
+if st.session_state.get("current_project_id") not in projects_by_id:
+    opened = [p for p in active_projects if p.get("last_opened_at")]
+    if opened:
+        st.session_state["current_project_id"] = max(opened, key=lambda p: str(p["last_opened_at"]))["id"]
+    elif active_projects:
+        st.session_state["current_project_id"] = active_projects[0]["id"]
+    else:
+        st.session_state["current_project_id"] = None
+current_project = projects_by_id.get(st.session_state.get("current_project_id"))
+current_id = current_project["id"] if current_project else None
+current_closed = bool(current_project) and current_project.get("status") != "active"
+
+
+def _search_changed():
+    st.session_state["view"] = "search" if st.session_state.get("search_q", "").strip() else "project"
+    st.session_state.pop("open_hits", None)
+
+
+# --- OLDALSÁV (SIDEBAR) ---
+with st.sidebar:
+    st.text_input("🔎 Keresés", key="search_q", on_change=_search_changed,
+                  placeholder="keresés dokumentumokban és összefoglalókban",
+                  help="Az aktív projektek dokumentumaiban és összefoglalóiban keres. Enterrel indul.")
+    st.checkbox("Lezárt projektekben is", key="search_closed", on_change=_search_changed)
+
+    if not st.session_state.get("index_done"):
+        try:
+            unindexed = db.unindexed_documents()
+        except db.DbError:
+            unindexed = []
+        if not unindexed:
+            st.session_state["index_done"] = True
+        else:
+            st.caption(f"{len(unindexed)} régebbi dokumentum tartalmában még nem lehet keresni.")
+            if st.button("Feldolgozás a kereséshez", key="index_btn", **STRETCH):
+                failed = index_old_documents(unindexed)
+                if failed:
+                    st.error("Nem sikerült feldolgozni: " + "; ".join(failed[:5]))
+                else:
+                    st.rerun()
+
+    st.divider()
+    st.header("🗂️ Projektek")
+
+    with st.form("project_form", clear_on_submit=True):
+        new_project_name = st.text_input("Új téma / projekt neve:")
+        submit_button = st.form_submit_button("➕ Projekt létrehozása", **STRETCH)
+        if submit_button and new_project_name.strip():
+            try:
+                created = db.create_project(new_project_name, top_sort_order(all_projects))
+            except db.DbError as e:
+                st.error(f"A projekt létrehozása nem sikerült: {e}")
+            else:
+                if created:
+                    st.session_state["current_project_id"] = created["id"]
+                    st.session_state["view"] = "project"
+                st.rerun()
+
+    if active_projects:
+        st.subheader("Aktív ügyek")
+        for p in active_projects:
+            if st.button(p["name"], key=f"proj_{p['id']}", type="primary" if p["id"] == current_id else "secondary",
+                         **STRETCH):
+                open_project(p["id"])
+                st.rerun()
+        if current_project and not current_closed:
+            st.caption("A kiválasztott projekt:")
+            index = [p["id"] for p in active_projects].index(current_id)
+            col_up, col_down, col_close = st.columns([1, 1, 2.2])
+            try:
+                if col_up.button("▲", key="proj_up", help="Feljebb a listában", disabled=index == 0, **STRETCH):
+                    move_project(active_projects, current_id, -1)
+                    st.rerun()
+                if col_down.button("▼", key="proj_down", help="Lejjebb a listában",
+                                   disabled=index == len(active_projects) - 1, **STRETCH):
+                    move_project(active_projects, current_id, +1)
+                    st.rerun()
+                if col_close.button("🔒 Lezárás", key="proj_close", **STRETCH,
+                                    help="A projekt a lezártak közé kerül: megmarad és olvasható, de nem lehet benne kérdezni."):
+                    db.update_project(current_id, status="closed")
+                    st.rerun()
+            except db.DbError as e:
+                st.error(f"A művelet nem sikerült: {e}")
+    else:
+        st.info("Nincs aktív projekt.")
+
+    if closed_projects:
+        with st.expander(f"Lezárt projektek ({len(closed_projects)})", expanded=current_closed):
+            for p in closed_projects:
+                if st.button(p["name"], key=f"proj_{p['id']}",
+                             type="primary" if p["id"] == current_id else "secondary", **STRETCH):
+                    open_project(p["id"])
+                    st.rerun()
+            if current_closed:
+                st.caption("A kiválasztott lezárt projekt:")
+                col_reopen, col_delete = st.columns(2)
+                if col_reopen.button("🔓 Újranyitás", key="proj_reopen", **STRETCH):
                     try:
-                        office_text = ex.office_to_text(mime, base64.b64decode(b64_data))
-                    except Exception:
-                        office_text = None
-                    if office_text:
-                        text_attachments.append(f"[Mellékelt fájl tartalma ({doc['name']}):\n{office_text}]")
+                        db.update_project(current_id, status="active", sort_order=top_sort_order(all_projects))
+                        st.rerun()
+                    except db.DbError as e:
+                        st.error(f"Az újranyitás nem sikerült: {e}")
+                if col_delete.button("🗑️ Törlés", key="proj_delete", **STRETCH):
+                    st.session_state["delete_open"] = current_id
+                    st.rerun()
 
-            if text_attachments:
-                user_input = "\n\n".join(text_attachments) + f"\n\n{user_input}"
+# --- FEJLÉC (mindig látható) ---
+search_query = st.session_state.get("search_q", "").strip()
+in_search = st.session_state.get("view") == "search" and bool(search_query)
 
-            current_content.append({
-                "type": "text",
-                "text": user_input
-            })
-            
-            api_messages.append({"role": "user", "content": current_content})
-            
-            # SYSTEM PROMPT A GYÖNYÖRŰ MAGYAR JOGI NYELVÉRT
-            system_instruction = (
-                "Te egy professzionális, rendkívül intelligens és precíz jogi és törvényelemző AI asszisztens vagy, "
-                "akit Piritának (vagy röviden Pirinek) hívnak. Feladatod, hogy a felhasználót maximális szakértelemmel, "
-                "részletesen, ugyanakkor teljesen érthetően segítsd az adózási, vállalkozási és bonyolult jogi ügyekben.\n"
-                "Képes vagy képek, képernyőképek és dokumentumok elemzésére is. Ha a felhasználó képet küld, "
-                "elemezd azt tűpontosan és válaszolj a kérdéseire.\n\n"
-                "KÖTELEZŐEN BETARTANDÓ SZABÁLYOK:\n"
-                "1. Kizárólag tökéletes, érett, szakmailag hiteles és nyelvtanilag teljesen hibátlan MAGYAR nyelven válaszolj!\n"
-                "2. Kerüld a tükörfordításokat és az angolos, mesterkélt kifejezéseket. Fogalmazz úgy, mint egy tapasztalt hazai tanácsadó.\n"
-                "3. A válaszaid legyenek alaposak és strukturáltak. Használj vastag betűs kiemeléseket és listákat.\n"
-                "4. Ne siesd el a választ, fejtsd ki részletesen a pontokat!\n\n"
-                "INTERNETES KERESÉS:\n"
-                f"A mai dátum: {date.today().isoformat()}. Van internetes keresési lehetőséged. "
-                "A tudásod egy jóval korábbi időpontig tart, ezért a hatályos jogszabályokra, adómértékekre, határidőkre, "
-                "díjakra, hatósági szabályokra és minden aktuális adatra keress rá, mielőtt válaszolsz, még ha biztosnak is érzed magad. "
-                "Magyar jogi és adózási kérdésekben elsősorban hivatalos forrásokat használj (pl. njt.hu, nav.gov.hu, magyarkozlony.hu). "
-                "A válaszban jelöld meg, mely forrásokra támaszkodtál.\n\n"
-                "DOKUMENTUMKÉSZÍTÉS:\n"
-                "Ha a felhasználó dokumentum, táblázat vagy prezentáció készítését kéri, használd a megfelelő eszközt: "
-                "create_document (szöveges dokumentum, amelyet a felhasználó Word, PDF vagy Markdown formátumban tölt le), "
-                "create_spreadsheet (Excel táblázat, amelyben a számolt értékek képletek, a számok pedig megfelelő "
-                "számformátumúak legyenek, hogy a felhasználó tovább tudjon dolgozni vele), "
-                "create_presentation (PowerPoint). Egyszerű kérdésre ne készíts fájlt, arra a chatben válaszolj. "
-                "Fájl kizárólag az eszköz tényleges meghívásával jön létre: a kért dokumentum teljes szövegét ne a "
-                "chatbe írd, hanem az eszköznek add át, és soha ne állítsd, hogy egy fájl elkészült, ha az eszköz "
-                "ezt nem igazolta vissza. Nagyon hosszú anyagot bonts több fájlra, válaszonként egy eszközhívással. "
-                "A fájl elkészítése után röviden írd le, mit tartalmaz és mire kell figyelni; a letöltőgombokat az "
-                "alkalmazás teszi a válaszod alá, te ne írj letöltési hivatkozást vagy „Elkészült” sort. "
-                "A korábban elkészült fájlok tartalmát a mellékelt dokumentumok között látod; "
-                "módosítást új fájl készítésével végezz, és jelezd, hogy új változat készült. "
-                "Ha egy állítás bizonytalan vagy ellenőrzést igényel, a dokumentumban is jelöld."
-            )
+if in_search:
+    right_html = f'Keresés: <mark>{html.escape(search_query)}</mark>'
+elif current_project:
+    right_html = html.escape(current_project["name"]) + ('<span class="badge">(lezárt)</span>' if current_closed else "")
+else:
+    right_html = ""
+col_title, col_back = st.columns([6, 2])
+col_title.markdown(
+    '<div class="piri-header">🤖 Piri AI Munkaállomás'
+    + (f'<span class="sep">|</span>{right_html}' if right_html else "") + "</div>",
+    unsafe_allow_html=True)
+if search_query and not in_search:
+    if col_back.button("← Vissza a találatokhoz", key="back_to_search", **STRETCH):
+        st.session_state["view"] = "search"
+        st.rerun()
 
-            # Eszközök: a beépített webes kereső (az Anthropic szerverein fut) és a dokumentumkészítők (nálunk futnak)
-            tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}] + ex.TOOLS
+# --- FŐKÉPERNYŐ ---
+if in_search:
+    render_search(active_projects, closed_projects)
+elif current_project:
+    try:
+        project_docs = db.get_documents(current_id)   # csak metaadatok; a tartalom igény szerint töltődik be
+        messages = db.get_messages(current_id)
+        summaries = db.get_summaries(current_id)
+        attachments = db.get_attachments(current_id)
+    except db.DbError as e:
+        st.error(f"A projekt adatai nem tölthetők be: {e}")
+        st.stop()
+    atts_by_msg = {}
+    for att in attachments:
+        atts_by_msg.setdefault(att["message_id"], []).append(att)
 
-            taken_names = {d["name"] for d in project_docs}
+    if st.session_state.get("delete_open") == current_id and current_closed:
+        delete_dialog(current_project)
+    elif st.session_state.get("compact_open") == current_id and messages and not current_closed:
+        compact_dialog(current_project, messages, atts_by_msg, summaries, project_docs)
 
-            def save_created_file(name, mime, data):
-                """Piri által készített fájl mentése; siker esetén a tárolt (egyedi) fájlnevet adja vissza."""
-                final_name = unique_name(name, taken_names)
-                ok, detail = save_document_bytes(current_project_id, final_name, mime, data)
-                if ok:
-                    taken_names.add(final_name)
-                return ok, (final_name if ok else detail)
-
-            with st.chat_message("assistant"):
-                with st.spinner("Piri elemzi a tartalmat, keres és gondolkodik... (hosszabb dokumentumnál ez több perc is lehet)"):
-                    answer, sources, created_files, problems = chat_flow.run_conversation(
-                        claude_client,
-                        "claude-haiku-5-5",  # A Claude Haiku 3.5 2026.02.19-én kivezetésre került
-                        system_instruction,
-                        api_messages,
-                        tools,
-                        save_created_file,
-                    )
-                    answer = answer or "(Piri most nem adott szöveges választ.)"
-                    # A hibát az elmentett válaszba is beírjuk, mert az oldal rögtön újratöltődik
-                    if problems:
-                        answer += f"\n\n{PROBLEM_MARK} " + " ".join(problems)
-                    if created_files:
-                        answer += (f"\n\n{CREATED_MARK} " + ", ".join(f"`{n}`" for n in created_files)
-                                   + " – itt lent és a **Dokumentumok** fülön is letölthető.")
-                    if sources:
-                        answer += "\n\n**Források:**\n" + "\n".join(f"- [{title}]({url})" for url, title in sources.items())
-                    st.write(answer)
-            
-            save_message(current_project_id, "assistant", answer)
-            st.rerun()
-            
-    with tab_diagrams:
-        st.subheader("Generált folyamatábrák")
+    tab_chat, tab_docs, tab_sums = st.tabs(
+        ["💬 Beszélgetés", "📄 Dokumentumok", "📋 Összefoglalók"])  # állandó feliratok, különben fülváltás lenne
+    with tab_chat:
+        render_chat_tab(current_project, current_closed, project_docs, messages, atts_by_msg, summaries)
+    with tab_docs:
+        render_docs_tab(current_project, current_closed, project_docs)
+    with tab_sums:
+        render_summaries_tab(current_project, current_closed, summaries, messages)
 else:
     st.write("### 👈 Kezdéshez válassz vagy hozz létre egy projektet a bal oldali sávban!")

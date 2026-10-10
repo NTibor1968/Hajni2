@@ -4,8 +4,9 @@
 - Táblázat: strukturált JSON-ból Excel (.xlsx), képletekkel és számformátumokkal.
 - Prezentáció: strukturált JSON-ból PowerPoint (.pptx).
 - Olvasás: a tárolt .xlsx / .pptx / .docx szöveggé alakítása, hogy Piri lássa a tartalmukat.
+- Szövegkinyerés a kereséshez: szöveges fájl, PDF és a fenti irodai formátumok.
 
-Csak sima pip-csomagok kellenek: markdown-it-py, python-docx, reportlab, openpyxl, python-pptx.
+Csak sima pip-csomagok kellenek: markdown-it-py, python-docx, reportlab, openpyxl, python-pptx, pypdf.
 A PDF-hez a fonts/ mappában lévő DejaVu betűtípusok kellenek (az ő és ű betűk miatt).
 """
 import datetime
@@ -904,3 +905,33 @@ def office_to_text(mime, data):
     if mime == DOCX_MIME:
         return docx_to_text(data)
     return None
+
+
+def pdf_to_text(data, max_chars=300_000):
+    """Szöveges (vektoros) PDF tartalma. Szkennelt PDF-ből nem jön ki szöveg, ilyenkor üres a válasz."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    out, total = [], 0
+    for page in reader.pages:
+        text = (page.extract_text() or "").strip()
+        if text:
+            out.append(text)
+            total += len(text)
+            if total >= max_chars:
+                break
+    return "\n\n".join(out)[:max_chars]
+
+
+def extract_text(name, mime, data):
+    """A fájl szövege a kereséshez. None, ha a fájlból nem nyerhető ki szöveg (kép, sérült vagy védett fájl)."""
+    name = str(name or "").lower()
+    mime = str(mime or "")
+    try:
+        if mime.startswith("text/") or name.endswith((".txt", ".md", ".csv")):
+            return data.decode("utf-8", errors="replace")
+        if mime == PDF_MIME or name.endswith(".pdf"):
+            return pdf_to_text(data)
+        return office_to_text(mime, data)
+    except Exception:
+        return None
