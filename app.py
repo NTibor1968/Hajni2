@@ -29,6 +29,7 @@ FALLBACK_HEIGHT_PX = 520  # régebbi Streamlit esetén ez a fix magasság érvé
 
 MAX_FILE_MB = 10   # a tartalom Base64-ként az adatbázisban tárolódik, ezért korlátozzuk a méretet
 MAX_IMAGE_MB = 5   # ennél nagyobb képet a modell nem fogad el
+DOC_TYPES = ["txt", "pdf", "png", "jpg", "jpeg", "docx", "xlsx", "pptx"]  # a dokumentumtárba feltölthető
 ATTACH_TYPES = ["png", "jpg", "jpeg", "gif", "webp", "pdf", "txt", "md", "csv", "docx", "xlsx", "pptx"]
 EXT_MIME = {
     "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp",
@@ -83,6 +84,13 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-sums_box) {{
 .st-key-search_box,
 div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-search_box) {{
     height: calc(100vh - {SEARCH_OFFSET_PX}px) !important; min-height: 260px; }}
+
+/* A fix magasságú dobozban a tartalom görgessen, ne zsugorodjon: enélkül a megadott magasságú elemek
+   (pl. a szerkesztőmezők) összenyomódnak, amikor a tartalom nem fér ki. */
+.st-key-chat_box > *, .st-key-docs_box > *, .st-key-sums_box > *, .st-key-search_box > *,
+.st-key-chat_box [data-testid="stElementContainer"], .st-key-docs_box [data-testid="stElementContainer"],
+.st-key-sums_box [data-testid="stElementContainer"], .st-key-search_box [data-testid="stElementContainer"] {{
+    flex-shrink: 0 !important; }}
 
 /* keresési találatok */
 .piri-hit {{ margin: .1rem 0 .2rem 0; }}
@@ -515,6 +523,63 @@ def compact_button(project, key):
         st.rerun()
 
 
+# --- ELŐZMÉNYEK TÖRLÉSE ÖSSZEFOGLALÓ NÉLKÜL -----------------------------------
+def _close_trim_dialog():
+    st.session_state.pop("trim_open", None)
+
+
+def trim_points(messages):
+    """Azok a helyek (sorszámok), ahonnan a beszélgetés vége törölhető: a felhasználó kérdései, hogy a
+    megmaradó rész mindig teljes kérdés–válasz párokból álljon. Ha nincs ilyen, bármelyik üzenet."""
+    with_id = [i for i, m in enumerate(messages) if m.get("id") is not None]
+    return [i for i in with_id if messages[i].get("role") == "user"] or with_id
+
+
+def trim_label(msg):
+    text = " ".join(str(msg.get("content") or "").split())
+    return f"{fmt_dt(msg.get('created_at'))} – {text[:90]}{'…' if len(text) > 90 else ''}"
+
+
+@dialog("✂️ Előzmények törlése összefoglaló nélkül", _close_trim_dialog, width="large")
+def trim_dialog(project, messages, atts_by_msg):
+    points = trim_points(messages)
+    if not points:
+        st.info("Nincs törölhető üzenet.")
+        return
+    st.caption("Válaszd ki, melyik kérdésedtől induljon a törlés. Az a kérdés és minden, ami utána jött, "
+               "törlődik; ami előtte volt, megmarad. Összefoglaló nem készül.")
+    start = st.selectbox("A törlés ettől a kérdéstől indul:", options=points, index=len(points) - 1,
+                         format_func=lambda i: trim_label(messages[i]), key=f"trim_start_{len(messages)}")
+    doomed = [m for m in messages[start:] if m.get("id") is not None]
+    n_atts = sum(len(atts_by_msg.get(m["id"], [])) for m in doomed)
+    kept = start
+    st.warning(
+        f"Véglegesen törlődik {len(doomed)} üzenet" + (f" és {n_atts} csatolt munkaanyag" if n_atts else "")
+        + (f"; megmarad az előtte lévő {kept} üzenet." if kept else "; a beszélgetésből semmi nem marad meg.")
+        + " A törlés nem vonható vissza. A dokumentumtár és az összefoglalók nem változnak.")
+    c1, c2 = st.columns(2)
+    if c1.button("🗑️ Igen, törlés", type="primary", key="trim_yes", **STRETCH):
+        try:
+            db.delete_messages(project["id"], [m["id"] for m in doomed])
+        except db.DbError as e:
+            st.error(f"A törlés nem sikerült: {e}")
+            return
+        st.session_state["chat_flash"] = ("success", f"{len(doomed)} üzenet törölve.")
+        _close_trim_dialog()
+        st.rerun()
+    if c2.button("Mégse", key="trim_no", **STRETCH):
+        _close_trim_dialog()
+        st.rerun()
+
+
+def trim_button(project, key):
+    if st.button("✂️ Törlés összefoglaló nélkül", key=key,
+                 help="Egy kiválasztott kérdésedtől a beszélgetés végéig minden törlődik (pl. vakvágány); "
+                      "ami előtte volt, megmarad. Összefoglaló nem készül."):
+        st.session_state["trim_open"] = project["id"]
+        st.rerun()
+
+
 # --- BESZÉLGETÉS FÜL ---------------------------------------------------------
 def show_flash(key):
     flash = st.session_state.pop(key, None)
@@ -532,7 +597,7 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
     docs_by_id = {d["id"]: d for d in project_docs}
 
     # Felső sor: mely projektdokumentumokat lássa Piri, és az összefoglalás gombja
-    col_docs, col_compact, _ = st.columns([2.4, 3, 4.6])
+    col_docs, col_compact, col_trim, _ = st.columns([2.4, 3, 2.4, 2.2])
     selected_doc_ids = []
     if project_docs and not readonly:
         doc_ids = [d["id"] for d in project_docs]
@@ -545,6 +610,8 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
     if messages and not readonly:
         with col_compact:
             compact_button(project, "compact_btn_chat")
+        with col_trim:
+            trim_button(project, "trim_btn_chat")
 
     chat_box = st.container(height=FALLBACK_HEIGHT_PX, border=False, key="chat_box")
     with chat_box:
@@ -700,8 +767,8 @@ def render_docs_tab(project, readonly, project_docs):
             # A kulcsban lévő számláló nullázza a feltöltőt mentés után, így nem mentjük el kétszer ugyanazt
             nonce = st.session_state.get("uploader_nonce", {}).get(pid, 0)
             uploaded_files = st.file_uploader(
-                "Projektdokumentum feltöltése (TXT, PDF, PNG, JPG):",
-                type=["txt", "pdf", "png", "jpg", "jpeg"],
+                "Projektdokumentum feltöltése (PDF, Word, Excel, PowerPoint, TXT, PNG, JPG):",
+                type=DOC_TYPES,
                 accept_multiple_files=True,
                 key=f"uploader_{pid}_{nonce}",
             )
@@ -1054,6 +1121,8 @@ elif current_project:
         delete_dialog(current_project)
     elif st.session_state.get("compact_open") == current_id and messages and not current_closed:
         compact_dialog(current_project, messages, atts_by_msg, summaries, project_docs)
+    elif st.session_state.get("trim_open") == current_id and messages and not current_closed:
+        trim_dialog(current_project, messages, atts_by_msg)
 
     tab_chat, tab_docs, tab_sums = st.tabs(
         ["💬 Beszélgetés", "📄 Dokumentumok", "📋 Összefoglalók"])  # állandó feliratok, különben fülváltás lenne

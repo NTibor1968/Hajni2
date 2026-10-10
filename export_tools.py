@@ -932,6 +932,9 @@ def extract_text(name, mime, data):
             return data.decode("utf-8", errors="replace")
         if mime == PDF_MIME or name.endswith(".pdf"):
             return pdf_to_text(data)
+        # a böngésző nem mindig küld pontos típust, ezért a kiterjesztés is dönthet
+        by_ext = {".xlsx": XLSX_MIME, ".pptx": PPTX_MIME, ".docx": DOCX_MIME}
+        mime = next((m for ext, m in by_ext.items() if name.endswith(ext)), mime)
         return office_to_text(mime, data)
     except Exception:
         return None
