@@ -69,8 +69,9 @@ hr {{ margin: .5rem 0 !important; }}
 /* oldalsáv: kevesebb üres hely felül, kisebb címek */
 [data-testid="stSidebarHeader"] {{ height: auto !important; min-height: 2rem; padding-top: .5rem !important; padding-bottom: 0 !important; }}
 [data-testid="stSidebarUserContent"] {{ padding-top: .5rem !important; }}
-[data-testid="stSidebar"] h2 {{ font-size: 1.15rem !important; padding: .2rem 0 !important; }}
-[data-testid="stSidebar"] h3 {{ font-size: 1rem !important; padding: .2rem 0 .1rem !important; }}
+[data-testid="stSidebar"] h2 {{ font-size: 1.15rem !important; padding: .2rem 0 .3rem !important; margin: 0 !important; line-height: 1.4 !important; }}
+[data-testid="stSidebar"] h3 {{ font-size: 1rem !important; padding: .2rem 0 .3rem !important; margin: 0 !important; line-height: 1.4 !important; }}
+[data-testid="stSidebar"] [data-testid="stHeading"] {{ margin: 0 !important; overflow: visible !important; }}
 /* az összefoglalók apró szerkesztés- és törlésgombja */
 [class*="st-key-sum_editbtn_"] button, [class*="st-key-sum_delbtn_"] button {{
     min-height: 1.7rem !important; padding: 0 .45rem !important; }}
@@ -90,16 +91,18 @@ hr {{ margin: .5rem 0 !important; }}
 [data-testid="stMarkdownContainer"] h6 {{ font-size: 1rem !important; font-weight: 700 !important; padding: .4rem 0 .1rem !important; }}
 
 /* a görgethető dobozok a böngészőablak magasságához igazodnak */
-.st-key-chat_box,
+/* (A :has() szabályok külön állnak: amelyik böngésző nem ismeri, az csak azt a blokkot hagyja ki.
+   A dvh a táblagépek és telefonok ténylegesen látható ablakmagassága; ahol nincs, a vh érvényes.) */
+.st-key-chat_box {{ height: calc(100vh - {CHAT_OFFSET_PX}px) !important; height: calc(100dvh - {CHAT_OFFSET_PX}px) !important; min-height: 260px; }}
+.st-key-docs_box, .st-key-sums_box {{ height: calc(100vh - {PANEL_OFFSET_PX}px) !important; height: calc(100dvh - {PANEL_OFFSET_PX}px) !important; min-height: 260px; }}
+.st-key-search_box {{ height: calc(100vh - {SEARCH_OFFSET_PX}px) !important; height: calc(100dvh - {SEARCH_OFFSET_PX}px) !important; min-height: 260px; }}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-chat_box) {{
-    height: calc(100vh - {CHAT_OFFSET_PX}px) !important; min-height: 260px; }}
-.st-key-docs_box, .st-key-sums_box,
+    height: calc(100vh - {CHAT_OFFSET_PX}px) !important; height: calc(100dvh - {CHAT_OFFSET_PX}px) !important; min-height: 260px; }}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-docs_box),
 div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-sums_box) {{
-    height: calc(100vh - {PANEL_OFFSET_PX}px) !important; min-height: 260px; }}
-.st-key-search_box,
+    height: calc(100vh - {PANEL_OFFSET_PX}px) !important; height: calc(100dvh - {PANEL_OFFSET_PX}px) !important; min-height: 260px; }}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-search_box) {{
-    height: calc(100vh - {SEARCH_OFFSET_PX}px) !important; min-height: 260px; }}
+    height: calc(100vh - {SEARCH_OFFSET_PX}px) !important; height: calc(100dvh - {SEARCH_OFFSET_PX}px) !important; min-height: 260px; }}
 
 /* A fix magasságú dobozban a tartalom görgessen, ne zsugorodjon: enélkül a megadott magasságú elemek
    (pl. a szerkesztőmezők) összenyomódnak, amikor a tartalom nem fér ki. */
@@ -532,7 +535,7 @@ def compact_dialog(project, messages, atts_by_msg, summaries, project_docs):
 
 
 def compact_button(project, key):
-    if st.button("🧹 Összefoglalás és előzmények törlése", key=key,
+    if st.button("🧹 Összefoglalás és törlés", key=key,
                  help="Piri összefoglalja az eddigi beszélgetést; jóváhagyásod után az üzenetek törlődnek, "
                       "és Piri az összefoglalóból dolgozik tovább."):
         st.session_state["compact_open"] = project["id"]
@@ -613,11 +616,12 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
     docs_by_id = {d["id"]: d for d in project_docs}
 
     # Felső sor: mely projektdokumentumokat lássa Piri, és az összefoglalás gombja
-    col_docs, col_compact, col_trim, _ = st.columns([2.4, 3, 2.4, 2.2])
+    col_docs, col_compact, col_trim = st.columns([2.6, 2.8, 3.2], gap="small")
     selected_doc_ids = []
     if project_docs and not readonly:
         doc_ids = [d["id"] for d in project_docs]
-        with col_docs.popover(f"📎 Piri dokumentumai ({len(project_docs)})"):
+        with col_docs.popover(f"📎 Dokumentumok ({len(project_docs)})",
+                              help="Mely projektdokumentumokat vegye figyelembe Piri a következő kérdésnél"):
             selected_doc_ids = st.multiselect(
                 "Ezeket a projektdokumentumokat veszi figyelembe Piri a következő kérdésnél:",
                 options=doc_ids, default=doc_ids, format_func=lambda i: docs_by_id[i]["name"],
