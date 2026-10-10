@@ -663,7 +663,7 @@ def render_chat_tab(project, readonly, project_docs, messages, atts_by_msg, summ
         return
 
     show_flash("chat_flash")
-    submitted = st.chat_input("Kérdezz Piritól; a gemkapoccsal képet vagy fájlt is csatolhatsz a kérdéshez…",
+    submitted = st.chat_input("Kérdezz Piritől; képet vagy fájlt is szúrhatsz be a kérdéshez…",
                               accept_file="multiple", file_type=ATTACH_TYPES, key=f"chat_input_{pid}")
     if not submitted:
         return
